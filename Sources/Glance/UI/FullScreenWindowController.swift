@@ -153,10 +153,12 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
             let resText = "\(decoded.originalWidth) × \(decoded.originalHeight)"
 
             var splitCgImage: CGImage? = nil
+            var rightNativeSize: CGSize? = nil
             if slideView.isSplitMode && currentFilteredPos + 1 < filteredIndices.count {
                 let nextRaw = filteredIndices[currentFilteredPos + 1]
                 if let nextDecoded = try? await pipeline.getImage(at: nextRaw) {
                     splitCgImage = nextDecoded.image
+                    rightNativeSize = CGSize(width: nextDecoded.originalWidth, height: nextDecoded.originalHeight)
                 }
             }
 
@@ -181,7 +183,8 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
                 decoded.image,
                 nextImage: splitCgImage,
                 info: info,
-                nativeSize: nativeSize
+                nativeSize: nativeSize,
+                rightNativeSize: rightNativeSize
             )
         } catch {
             let info = HudInfo(
@@ -322,15 +325,34 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
             // Instantly zoom the view using the screen-bounded layer first (0ms latency!)
             slideView.setZoom(true, anchorPointInView: mouseLocation)
 
+            // Check if in split mode to decode both left and right images at 100%
+            let isSplit = slideView.isSplitMode
+            let nextRawIndex: Int? = (isSplit && currentFilteredPos + 1 < filteredIndices.count)
+                ? filteredIndices[currentFilteredPos + 1]
+                : nil
+
             // Concurrently fetch the full 100% unconstrained sensor resolution in background
             Task {
-                if let fullRes = try? await pipeline.getFullResolutionImage(at: rawIndex) {
+                async let leftFullTask = try? self.pipeline.getFullResolutionImage(at: rawIndex)
+                async let rightFullTask: DecodedImage? = {
+                    if let rIdx = nextRawIndex {
+                        return try? await self.pipeline.getFullResolutionImage(at: rIdx)
+                    }
+                    return nil
+                }()
+
+                let (leftFull, rightFull) = await (leftFullTask, rightFullTask)
+
+                if let fullRes = leftFull {
                     let fullDims = CGSize(width: fullRes.originalWidth, height: fullRes.originalHeight)
+                    let rightDims = rightFull != nil ? CGSize(width: rightFull!.originalWidth, height: rightFull!.originalHeight) : nil
                     self.slideView.setZoom(
                         true,
                         anchorPointInView: mouseLocation,
                         fullResImage: fullRes.image,
-                        originalDimensions: fullDims
+                        originalDimensions: fullDims,
+                        rightFullResImage: rightFull?.image,
+                        rightOriginalDimensions: rightDims
                     )
                 }
             }

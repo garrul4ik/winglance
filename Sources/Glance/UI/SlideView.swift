@@ -33,9 +33,15 @@ public protocol SlideViewDelegate: AnyObject {
 public final class SlideView: NSView {
     public weak var delegate: SlideViewDelegate?
 
-    private let containerLayer = CALayer()
-    private let imageLayer = CALayer()
-    private let splitLayer = CALayer()
+    private let leftContainerLayer = CALayer()
+    private let leftImageLayer = CALayer()
+    private let rightContainerLayer = CALayer()
+    private let rightImageLayer = CALayer()
+
+    // Aliases for compatibility
+    private var containerLayer: CALayer { leftContainerLayer }
+    private var imageLayer: CALayer { leftImageLayer }
+    private var splitLayer: CALayer { rightImageLayer }
 
     public let hudView = GlassHudView()
     public let quickHelpView = QuickHelpView()
@@ -49,6 +55,7 @@ public final class SlideView: NSView {
     private var dragStartOffset: CGPoint = .zero
     private var isDragging: Bool = false
     private var currentImageSize: CGSize = .zero
+    private var rightImageSize: CGSize = .zero
 
     private var cursorTimer: Timer?
     private var trackingArea: NSTrackingArea?
@@ -71,33 +78,38 @@ public final class SlideView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
 
-        // Root container for image layer
-        containerLayer.backgroundColor = NSColor.black.cgColor
-        containerLayer.masksToBounds = true
-        layer?.addSublayer(containerLayer)
+        // Left Container Layer
+        leftContainerLayer.backgroundColor = NSColor.black.cgColor
+        leftContainerLayer.masksToBounds = true
+        layer?.addSublayer(leftContainerLayer)
 
-        // Main image layer
-        imageLayer.backgroundColor = NSColor.black.cgColor
-        imageLayer.isOpaque = true
-        imageLayer.actions = [
+        // Left Image Layer
+        leftImageLayer.backgroundColor = NSColor.black.cgColor
+        leftImageLayer.isOpaque = true
+        leftImageLayer.actions = [
             "contents": NSNull(),
             "bounds": NSNull(),
             "position": NSNull(),
             "transform": NSNull()
         ]
-        containerLayer.addSublayer(imageLayer)
+        leftContainerLayer.addSublayer(leftImageLayer)
 
-        // Split compare image layer
-        splitLayer.contentsGravity = .resizeAspect
-        splitLayer.backgroundColor = NSColor.black.cgColor
-        splitLayer.isOpaque = true
-        splitLayer.isHidden = true
-        splitLayer.actions = [
+        // Right Container Layer (for 2-Up Split Compare)
+        rightContainerLayer.backgroundColor = NSColor.black.cgColor
+        rightContainerLayer.masksToBounds = true
+        rightContainerLayer.isHidden = true
+        layer?.addSublayer(rightContainerLayer)
+
+        // Right Image Layer
+        rightImageLayer.backgroundColor = NSColor.black.cgColor
+        rightImageLayer.isOpaque = true
+        rightImageLayer.actions = [
             "contents": NSNull(),
             "bounds": NSNull(),
-            "position": NSNull()
+            "position": NSNull(),
+            "transform": NSNull()
         ]
-        layer?.addSublayer(splitLayer)
+        rightContainerLayer.addSublayer(rightImageLayer)
     }
 
     private func setupHud() {
@@ -147,41 +159,88 @@ public final class SlideView: NSView {
             CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
         }
 
+        let scale = window?.backingScaleFactor ?? 2.0
+
         if isSplitMode {
-            let halfWidth = bounds.width / 2
-            containerLayer.frame = CGRect(x: 0, y: 0, width: halfWidth - 1, height: bounds.height)
-            splitLayer.frame = CGRect(x: halfWidth + 1, y: 0, width: halfWidth - 1, height: bounds.height)
-            imageLayer.frame = containerLayer.bounds
-            imageLayer.contentsGravity = .resizeAspect
+            let halfWidth = (bounds.width - 2) / 2
+            let leftFrame = CGRect(x: 0, y: 0, width: halfWidth, height: bounds.height)
+            let rightFrame = CGRect(x: halfWidth + 2, y: 0, width: halfWidth, height: bounds.height)
+
+            leftContainerLayer.frame = leftFrame
+            rightContainerLayer.frame = rightFrame
+            rightContainerLayer.isHidden = false
+
+            if isZoomed {
+                // Synchronous 100% Pixel Peeping across BOTH split panes!
+                let nativeW1 = (currentImageSize.width > 0 ? currentImageSize.width : halfWidth * scale) / scale
+                let nativeH1 = (currentImageSize.height > 0 ? currentImageSize.height : bounds.height * scale) / scale
+
+                leftImageLayer.contentsGravity = .resize
+                leftImageLayer.bounds = CGRect(x: 0, y: 0, width: nativeW1, height: nativeH1)
+
+                let rSize = rightImageSize.width > 0 ? rightImageSize : currentImageSize
+                let nativeW2 = (rSize.width > 0 ? rSize.width : halfWidth * scale) / scale
+                let nativeH2 = (rSize.height > 0 ? rSize.height : bounds.height * scale) / scale
+
+                rightImageLayer.contentsGravity = .resize
+                rightImageLayer.bounds = CGRect(x: 0, y: 0, width: nativeW2, height: nativeH2)
+
+                let maxPanX1 = max(0, (nativeW1 - halfWidth) / 2)
+                let maxPanY1 = max(0, (nativeH1 - bounds.height) / 2)
+                let maxPanX2 = max(0, (nativeW2 - halfWidth) / 2)
+                let maxPanY2 = max(0, (nativeH2 - bounds.height) / 2)
+
+                let maxPanX = max(maxPanX1, maxPanX2)
+                let maxPanY = max(maxPanY1, maxPanY2)
+
+                zoomPanOffset.x = min(maxPanX, max(-maxPanX, zoomPanOffset.x))
+                zoomPanOffset.y = min(maxPanY, max(-maxPanY, zoomPanOffset.y))
+
+                leftImageLayer.position = CGPoint(
+                    x: (halfWidth / 2) + zoomPanOffset.x,
+                    y: (bounds.height / 2) + zoomPanOffset.y
+                )
+                rightImageLayer.position = CGPoint(
+                    x: (halfWidth / 2) + zoomPanOffset.x,
+                    y: (bounds.height / 2) + zoomPanOffset.y
+                )
+            } else {
+                leftImageLayer.contentsGravity = .resizeAspect
+                leftImageLayer.bounds = CGRect(origin: .zero, size: leftFrame.size)
+                leftImageLayer.position = CGPoint(x: leftFrame.width / 2, y: leftFrame.height / 2)
+
+                rightImageLayer.contentsGravity = .resizeAspect
+                rightImageLayer.bounds = CGRect(origin: .zero, size: rightFrame.size)
+                rightImageLayer.position = CGPoint(x: rightFrame.width / 2, y: rightFrame.height / 2)
+
+                zoomPanOffset = .zero
+            }
         } else {
-            containerLayer.frame = bounds
-            splitLayer.frame = .zero
+            leftContainerLayer.frame = bounds
+            rightContainerLayer.frame = .zero
+            rightContainerLayer.isHidden = true
 
             if isZoomed && currentImageSize.width > 0 && currentImageSize.height > 0 {
-                // 100% 1:1 Pixel Peep mode:
-                // Size layer to native image pixel dimensions scaled by backingScaleFactor
-                let scale = window?.backingScaleFactor ?? 2.0
+                // Single 100% 1:1 Pixel Peep mode
                 let nativeW = currentImageSize.width / scale
                 let nativeH = currentImageSize.height / scale
 
-                imageLayer.contentsGravity = .resize
-                imageLayer.bounds = CGRect(x: 0, y: 0, width: nativeW, height: nativeH)
+                leftImageLayer.contentsGravity = .resize
+                leftImageLayer.bounds = CGRect(x: 0, y: 0, width: nativeW, height: nativeH)
 
-                // Clamp panning offset so photo doesn't drift completely off-screen
                 let maxPanX = max(0, (nativeW - bounds.width) / 2)
                 let maxPanY = max(0, (nativeH - bounds.height) / 2)
                 zoomPanOffset.x = min(maxPanX, max(-maxPanX, zoomPanOffset.x))
                 zoomPanOffset.y = min(maxPanY, max(-maxPanY, zoomPanOffset.y))
 
-                imageLayer.position = CGPoint(
+                leftImageLayer.position = CGPoint(
                     x: (bounds.width / 2) + zoomPanOffset.x,
                     y: (bounds.height / 2) + zoomPanOffset.y
                 )
             } else {
-                // Fit to screen mode
-                imageLayer.contentsGravity = .resizeAspect
-                imageLayer.bounds = CGRect(origin: .zero, size: bounds.size)
-                imageLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+                leftImageLayer.contentsGravity = .resizeAspect
+                leftImageLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+                leftImageLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
                 zoomPanOffset = .zero
             }
         }
@@ -194,7 +253,8 @@ public final class SlideView: NSView {
         _ cgImage: CGImage?,
         nextImage: CGImage? = nil,
         info: HudInfo?,
-        nativeSize: CGSize? = nil
+        nativeSize: CGSize? = nil,
+        rightNativeSize: CGSize? = nil
     ) {
         if let size = nativeSize {
             currentImageSize = size
@@ -202,16 +262,22 @@ public final class SlideView: NSView {
             currentImageSize = CGSize(width: img.width, height: img.height)
         }
 
+        if let rSize = rightNativeSize {
+            rightImageSize = rSize
+        } else if let rImg = nextImage {
+            rightImageSize = CGSize(width: rImg.width, height: rImg.height)
+        }
+
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        imageLayer.contents = cgImage
+        leftImageLayer.contents = cgImage
 
         if isSplitMode && nextImage != nil {
-            splitLayer.contents = nextImage
-            splitLayer.isHidden = false
+            rightImageLayer.contents = nextImage
+            rightContainerLayer.isHidden = false
         } else {
-            splitLayer.contents = nil
-            splitLayer.isHidden = true
+            rightImageLayer.contents = nil
+            rightContainerLayer.isHidden = true
         }
         CATransaction.commit()
 
@@ -224,7 +290,6 @@ public final class SlideView: NSView {
 
     public func setSplitMode(_ enabled: Bool) {
         isSplitMode = enabled
-        if enabled { isZoomed = false }
         needsLayout = true
     }
 
@@ -252,13 +317,21 @@ public final class SlideView: NSView {
         _ zoomed: Bool,
         anchorPointInView: CGPoint? = nil,
         fullResImage: CGImage? = nil,
-        originalDimensions: CGSize? = nil
+        originalDimensions: CGSize? = nil,
+        rightFullResImage: CGImage? = nil,
+        rightOriginalDimensions: CGSize? = nil
     ) {
         if let dims = originalDimensions {
             currentImageSize = dims
         }
         if let fullImg = fullResImage {
-            imageLayer.contents = fullImg
+            leftImageLayer.contents = fullImg
+        }
+        if let rDims = rightOriginalDimensions {
+            rightImageSize = rDims
+        }
+        if let rFullImg = rightFullResImage {
+            rightImageLayer.contents = rFullImg
         }
 
         guard isZoomed != zoomed else { return }
@@ -266,25 +339,44 @@ public final class SlideView: NSView {
         hudView.updateZoomState(isZoomed)
 
         if isZoomed {
-            // Center zoom around mouse cursor position
+            // Anchor zoom around cursor location
             let mousePt = anchorPointInView ?? CGPoint(x: bounds.midX, y: bounds.midY)
-            let centerOffset = CGPoint(
-                x: bounds.midX - mousePt.x,
-                y: bounds.midY - mousePt.y
-            )
-
             let scale = window?.backingScaleFactor ?? 2.0
-            let nativeW = currentImageSize.width / scale
-            let nativeH = currentImageSize.height / scale
 
-            // Ratio of native size vs viewport fit
-            let fitRatioX = nativeW / max(1, bounds.width)
-            let fitRatioY = nativeH / max(1, bounds.height)
+            if isSplitMode {
+                // In 2-up split mode, treat mouse offset relative to whichever split pane it clicked in
+                let halfWidth = (bounds.width - 2) / 2
+                let paneLocalX = mousePt.x > halfWidth ? (mousePt.x - (halfWidth + 2)) : mousePt.x
+                let centerOffset = CGPoint(
+                    x: (halfWidth / 2) - paneLocalX,
+                    y: bounds.midY - mousePt.y
+                )
+                let nativeW = currentImageSize.width > 0 ? (currentImageSize.width / scale) : halfWidth
+                let nativeH = currentImageSize.height > 0 ? (currentImageSize.height / scale) : bounds.height
 
-            zoomPanOffset = CGPoint(
-                x: centerOffset.x * fitRatioX,
-                y: centerOffset.y * fitRatioY
-            )
+                let fitRatioX = nativeW / max(1, halfWidth)
+                let fitRatioY = nativeH / max(1, bounds.height)
+
+                zoomPanOffset = CGPoint(
+                    x: centerOffset.x * fitRatioX,
+                    y: centerOffset.y * fitRatioY
+                )
+            } else {
+                let centerOffset = CGPoint(
+                    x: bounds.midX - mousePt.x,
+                    y: bounds.midY - mousePt.y
+                )
+                let nativeW = currentImageSize.width / scale
+                let nativeH = currentImageSize.height / scale
+
+                let fitRatioX = nativeW / max(1, bounds.width)
+                let fitRatioY = nativeH / max(1, bounds.height)
+
+                zoomPanOffset = CGPoint(
+                    x: centerOffset.x * fitRatioX,
+                    y: centerOffset.y * fitRatioY
+                )
+            }
         } else {
             zoomPanOffset = .zero
         }
