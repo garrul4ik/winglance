@@ -158,6 +158,44 @@ swiftc -o /tmp/test_glance \
 
 ---
 
+## 🔮 Looking Ahead: v1.2.0 Roadmap
+
+<details>
+<summary><b>Click to expand planned features for Glance 1.2.0 (Theme: <i>Focus & Velocity</i>)</b></summary>
+
+<br />
+
+### 👁️ Focus & Sharpness Superpowers (Apple Neural Engine / Vision)
+- **Auto Face & Eye Jump (`Z` Double-Tap / `Shift + Z`)**:
+  - Leverages macOS’s built-in, offline `Vision.framework` on Apple Silicon.
+  - Automatically detects subject faces and eyes in portrait/event shoots. Double-tapping `Z` centers 100% zoom directly on the primary subject’s eye without manual panning across 60MP sensors.
+- **Focus Peaking Overlay (`Shift + F`)**:
+  - Real-time neon edge-contrast highlighting overlay (similar to camera EVFs).
+  - Instantly reveals whether critical pupil focus was nailed in under 100ms.
+
+### 👥 High-Speed Burst Culling & Safety
+- **4-Up Quad Compare (`Shift + S`)**:
+  - 2×2 grid comparison for consecutive high-speed burst shots with synchronous 1:1 zoom and pan.
+  - Number keys `1`–`4` instantly select the winning frame and mark the others for rejection.
+- **Multi-Level Undo & Redo (`Cmd + Z` / `Cmd + Shift + Z`)**:
+  - Dedicated in-memory undo buffer for culling tags, star ratings, color labels, and accidental file trashing.
+
+### 🎨 Color Fidelity & Apple XDR Display Engine
+- **Camera Film Simulation & Picture Profiles**:
+  - Native rendering of embedded camera color styles (Fujifilm Film Simulations like Classic Chrome/Astia, Sony Creative Looks, and Nikon Picture Controls).
+- **Liquid Retina XDR / EDR Highlights**:
+  - Leverages 1,000–1,600 nit specular highlight headroom on MacBook Pro and Pro Display XDR screens via Apple’s Extended Dynamic Range pipeline.
+
+### 🎛️ Tactile Polish & External Retouch Handoff
+- **Force Touch Trackpad Haptics**:
+  - Subtle mechanical click feedback via `NSHapticFeedbackManager` whenever a rating (`1`–`5`), pick (`P`), or reject (`X`) is toggled.
+- **External App Quick Handoff (`Cmd + Enter`)**:
+  - One-key handoff to immediately open the current master RAW or photo in Photoshop, Lightroom Classic, or Capture One for detailed retouching.
+
+</details>
+
+---
+
 ## 📄 License ⚖️
 
 Glance is open-source software licensed under the [MIT License](LICENSE).
