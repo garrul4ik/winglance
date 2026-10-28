@@ -8,12 +8,12 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
     private let scanner: DirectoryScanner
 
     private var allItems: [SlideItem] = []
-    private var cullingData: [String: CullingMetadata] = [:] // Keyed by item id (file path)
+    private var cullingData: [String: CullingMetadata] = [:]
 
     // Filter & Navigation
     private var currentFilter: CullingFilter = .all
-    private var filteredIndices: [Int] = [] // Indices into allItems
-    private var currentFilteredPos: Int = 0 // Position within filteredIndices
+    private var filteredIndices: [Int] = []
+    private var currentFilteredPos: Int = 0
 
     private var autoAdvance: Bool = false
     private var isDeleting: Bool = false
@@ -152,7 +152,6 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
             let decoded = try await pipeline.getImage(at: rawIndex)
             let resText = "\(decoded.originalWidth) × \(decoded.originalHeight)"
 
-            // Check if split mode next image is available
             var splitCgImage: CGImage? = nil
             if slideView.isSplitMode && currentFilteredPos + 1 < filteredIndices.count {
                 let nextRaw = filteredIndices[currentFilteredPos + 1]
@@ -176,7 +175,13 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
                 filterTitle: filterBadge
             )
 
-            slideView.displayImage(decoded.image, nextImage: splitCgImage, info: info)
+            let nativeSize = CGSize(width: decoded.originalWidth, height: decoded.originalHeight)
+            slideView.displayImage(
+                decoded.image,
+                nextImage: splitCgImage,
+                info: info,
+                nativeSize: nativeSize
+            )
         } catch {
             let info = HudInfo(
                 currentIndex: currentFilteredPos,
@@ -301,6 +306,34 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
             } else {
                 slideView.hudView.showMessage("Moved \(trashedCount) rejected files to Trash.")
                 await self.loadAndDisplayCurrent()
+            }
+        }
+    }
+
+    // MARK: - 100% 1:1 Pixel Peep Action
+
+    public func slideViewRequestZoomToggle(mouseLocation: CGPoint) {
+        if slideView.isZoomed {
+            slideView.setZoom(false)
+            slideView.hudView.showMessage("Fit to Screen [Z]")
+        } else {
+            guard let rawIndex = currentRawIndex else { return }
+            slideView.hudView.showMessage("100% Actual Pixels [Z]")
+
+            // Instantly zoom the view using the screen-bounded layer first (0ms latency!)
+            slideView.setZoom(true, anchorPointInView: mouseLocation)
+
+            // Concurrently fetch the full 100% unconstrained sensor resolution in background
+            Task {
+                if let fullRes = try? await pipeline.getFullResolutionImage(at: rawIndex) {
+                    let fullDims = CGSize(width: fullRes.originalWidth, height: fullRes.originalHeight)
+                    self.slideView.setZoom(
+                        true,
+                        anchorPointInView: mouseLocation,
+                        fullResImage: fullRes.image,
+                        originalDimensions: fullDims
+                    )
+                }
             }
         }
     }

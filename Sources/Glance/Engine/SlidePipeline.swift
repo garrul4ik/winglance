@@ -8,16 +8,23 @@ public enum SlideDirection: Sendable {
 }
 
 /// Actor managing the triple/lookahead buffer cache and background preloading.
+/// Supports both fast screen-bounded downscaled previews and full 1:1 actual-pixel decodes.
 public actor SlidePipeline {
     private var items: [SlideItem] = []
     private var currentIndex: Int = 0
     private var maxPixelSize: Int = 3840
 
-    /// In-memory cache of decoded images: [Index: DecodedImage]
+    /// In-memory cache of screen-bounded decoded images: [Index: DecodedImage]
     private var cache: [Int: DecodedImage] = [:]
 
-    /// Active decode tasks: [Index: Task<DecodedImage, Error>]
+    /// Active screen-bounded decode tasks: [Index: Task<DecodedImage, Error>]
     private var inFlightTasks: [Int: Task<DecodedImage, Error>] = [:]
+
+    /// In-memory cache of full-resolution 1:1 images for pixel-peeping: [Index: DecodedImage]
+    private var fullResCache: [Int: DecodedImage] = [:]
+
+    /// Active full-resolution decode task
+    private var inFlightFullResTask: (index: Int, task: Task<DecodedImage, Error>)?
 
     private let decoder: ImageDecoder
 
@@ -31,15 +38,14 @@ public actor SlidePipeline {
 
     /// Configures the pipeline with a new list of items and initial index.
     public func setPlaylist(items: [SlideItem], initialIndex: Int, maxPixelSize: Int) {
-        // Cancel all existing tasks
         cancelAllTasks()
         cache.removeAll()
+        fullResCache.removeAll()
 
         self.items = items
         self.currentIndex = max(0, min(initialIndex, items.count - 1))
         self.maxPixelSize = maxPixelSize
 
-        // Preload immediate window
         preloadWindow(around: self.currentIndex, direction: .forward)
     }
 
@@ -47,13 +53,10 @@ public actor SlidePipeline {
     public func updateBoundingSize(_ newSize: Int) {
         guard self.maxPixelSize != newSize else { return }
         self.maxPixelSize = newSize
-        // Re-preload current window with new resolution
         preloadWindow(around: self.currentIndex, direction: .forward)
     }
 
-    /// Retrieves the decoded image for a given index.
-    /// If cached, returns immediately.
-    /// If not cached, awaits its decode or starts decoding immediately with high priority.
+    /// Retrieves the screen-bounded decoded image for a given index (0ms from cache).
     public func getImage(at index: Int) async throws -> DecodedImage {
         guard index >= 0 && index < items.count else {
             throw NSError(domain: "SlidePipeline", code: 404, userInfo: [
@@ -94,25 +97,83 @@ public actor SlidePipeline {
         }
     }
 
-    /// Notifies the pipeline of navigation to a new index, adjusting preloading priority and pruning old cache entries.
+    /// Retrieves the 100% full-resolution unconstrained 1:1 image for pixel peeping.
+    public func getFullResolutionImage(at index: Int) async throws -> DecodedImage {
+        guard index >= 0 && index < items.count else {
+            throw NSError(domain: "SlidePipeline", code: 404, userInfo: [
+                NSLocalizedDescriptionKey: "Index \(index) out of bounds."
+            ])
+        }
+
+        // 1. If screen-bounded image is already not downscaled (original was smaller than screen), reuse it!
+        if let cached = cache[index], !cached.isDownscaled {
+            return cached
+        }
+
+        // 2. Check full-res cache
+        if let fullCached = fullResCache[index] {
+            return fullCached
+        }
+
+        // 3. Check if current task in flight
+        if let inFlight = inFlightFullResTask, inFlight.index == index {
+            return try await inFlight.task.value
+        }
+
+        // Cancel previous full-res task if user moved to another photo
+        inFlightFullResTask?.task.cancel()
+
+        let item = items[index]
+        let decoder = self.decoder
+
+        let task = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            // Passing 0 or nil requests 100% unconstrained native sensor resolution
+            return try decoder.decode(at: item.url, maxBoundingPixelSize: 0)
+        }
+
+        inFlightFullResTask = (index: index, task: task)
+
+        do {
+            let decoded = try await task.value
+            // Keep at most 2 full-res images in RAM to preserve memory
+            if fullResCache.count >= 2 {
+                fullResCache.removeAll()
+            }
+            fullResCache[index] = decoded
+            inFlightFullResTask = nil
+            return decoded
+        } catch {
+            inFlightFullResTask = nil
+            throw error
+        }
+    }
+
+    /// Notifies the pipeline of navigation to a new index.
     public func navigate(to index: Int, direction: SlideDirection) {
         guard index >= 0 && index < items.count else { return }
         self.currentIndex = index
+        // Prune full-res cache when navigating away
+        if fullResCache.keys.contains(where: { abs($0 - index) > 1 }) {
+            fullResCache.removeAll()
+        }
+        inFlightFullResTask?.task.cancel()
+        inFlightFullResTask = nil
+
         pruneAndPreload(around: index, direction: direction)
     }
 
-    /// Removes an item at the given index (e.g. after deletion) and updates internal state.
+    /// Removes an item at the given index and updates internal state.
     public func removeItem(at index: Int) -> Int {
         guard index >= 0 && index < items.count else { return currentIndex }
 
-        // Cancel tasks and clear cache
         inFlightTasks[index]?.cancel()
         inFlightTasks.removeValue(forKey: index)
         cache.removeValue(forKey: index)
+        fullResCache.removeValue(forKey: index)
 
         items.remove(at: index)
 
-        // Shift cache keys above index
         var newCache: [Int: DecodedImage] = [:]
         for (k, v) in cache {
             if k < index {
@@ -123,7 +184,6 @@ public actor SlidePipeline {
         }
         cache = newCache
 
-        // Shift inFlight tasks
         var newTasks: [Int: Task<DecodedImage, Error>] = [:]
         for (k, v) in inFlightTasks {
             if k < index {
@@ -134,7 +194,6 @@ public actor SlidePipeline {
         }
         inFlightTasks = newTasks
 
-        // Adjust current index
         if items.isEmpty {
             currentIndex = 0
         } else if currentIndex >= items.count {
@@ -145,10 +204,11 @@ public actor SlidePipeline {
         return currentIndex
     }
 
-    /// Batch removes items at the given indices (e.g. purging rejects)
+    /// Batch removes items at the given indices.
     public func removeItems(at indices: Set<Int>) {
         cancelAllTasks()
         cache.removeAll()
+        fullResCache.removeAll()
 
         let sorted = indices.sorted(by: >)
         for idx in sorted {
@@ -168,20 +228,17 @@ public actor SlidePipeline {
     private func pruneAndPreload(around centerIndex: Int, direction: SlideDirection) {
         let validRange = (centerIndex - cacheRadius)...(centerIndex + cacheRadius)
 
-        // 1. Evict images outside sliding window
         let keysToEvict = cache.keys.filter { !validRange.contains($0) }
         for key in keysToEvict {
             cache.removeValue(forKey: key)
         }
 
-        // 2. Cancel tasks outside sliding window
         let tasksToCancel = inFlightTasks.keys.filter { !validRange.contains($0) }
         for key in tasksToCancel {
             inFlightTasks[key]?.cancel()
             inFlightTasks.removeValue(forKey: key)
         }
 
-        // 3. Preload window
         preloadWindow(around: centerIndex, direction: direction)
     }
 
@@ -244,5 +301,7 @@ public actor SlidePipeline {
             task.cancel()
         }
         inFlightTasks.removeAll()
+        inFlightFullResTask?.task.cancel()
+        inFlightFullResTask = nil
     }
 }

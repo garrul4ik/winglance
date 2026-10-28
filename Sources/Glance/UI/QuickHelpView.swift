@@ -63,7 +63,6 @@ public final class QuickHelpView: NSView {
         root.alignment = .leading
         root.spacing = 14
         root.translatesAutoresizingMaskIntoConstraints = false
-        // Generous insets: 28pt padding so text never touches the curved borders
         root.edgeInsets = NSEdgeInsets(top: 22, left: 28, bottom: 22, right: 32)
         visualEffectView.addSubview(root)
 
@@ -100,6 +99,7 @@ public final class QuickHelpView: NSView {
         col2.alignment = .leading
         col2.spacing = 8
         col2.translatesAutoresizingMaskIntoConstraints = false
+        col2.addArrangedSubview(makeRow(key: "Z", desc: "100% Zoom / Pan"))
         col2.addArrangedSubview(makeRow(key: "S", desc: "Split compare"))
         col2.addArrangedSubview(makeRow(key: "\\", desc: "Cycle filter"))
         col2.addArrangedSubview(makeRow(key: "⇧ ⌫", desc: "Purge rejects"))
@@ -116,7 +116,6 @@ public final class QuickHelpView: NSView {
             root.leadingAnchor.constraint(equalTo: visualEffectView.leadingAnchor),
             root.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor),
 
-            // Ensure column 2 has enough guaranteed width so text isn't cramped
             col2.widthAnchor.constraint(greaterThanOrEqualToConstant: 165)
         ])
     }
@@ -128,7 +127,6 @@ public final class QuickHelpView: NSView {
         row.spacing = 10
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        // Keycap badge
         let keycap = NSView()
         keycap.wantsLayer = true
         keycap.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.12).cgColor
@@ -155,7 +153,6 @@ public final class QuickHelpView: NSView {
         descLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
         descLabel.textColor = NSColor(white: 0.85, alpha: 1.0)
         descLabel.lineBreakMode = .byClipping
-        // Prevent label from being compressed or truncated
         descLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         descLabel.setContentHuggingPriority(.required, for: .horizontal)
         row.addArrangedSubview(descLabel)

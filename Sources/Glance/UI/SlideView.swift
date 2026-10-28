@@ -21,21 +21,34 @@ public protocol SlideViewDelegate: AnyObject {
     func slideViewToggleAutoAdvance()
     func slideViewCycleFilter()
     func slideViewToggleSplitCompare()
+
+    // 100% Zoom Action
+    func slideViewRequestZoomToggle(mouseLocation: CGPoint)
 }
 
 /// Ultra-responsive, zero-latency layer-backed NSView.
 /// Supports single image full-screen display, 2-up split burst compare mode,
-/// and quick shortcut help overlays.
+/// instant 100% 1:1 pixel peeping with smooth pan/drag, and quick help overlay.
 @MainActor
 public final class SlideView: NSView {
     public weak var delegate: SlideViewDelegate?
 
+    private let containerLayer = CALayer()
     private let imageLayer = CALayer()
     private let splitLayer = CALayer()
+
     public let hudView = GlassHudView()
     public let quickHelpView = QuickHelpView()
 
     public private(set) var isSplitMode: Bool = false
+    public private(set) var isZoomed: Bool = false
+
+    // Zoom & Pan state
+    private var zoomPanOffset: CGPoint = .zero
+    private var dragStartMouse: CGPoint = .zero
+    private var dragStartOffset: CGPoint = .zero
+    private var isDragging: Bool = false
+    private var currentImageSize: CGSize = .zero
 
     private var cursorTimer: Timer?
     private var trackingArea: NSTrackingArea?
@@ -58,18 +71,23 @@ public final class SlideView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
 
-        // Left / Main image
-        imageLayer.contentsGravity = .resizeAspect
+        // Root container for image layer
+        containerLayer.backgroundColor = NSColor.black.cgColor
+        containerLayer.masksToBounds = true
+        layer?.addSublayer(containerLayer)
+
+        // Main image layer
         imageLayer.backgroundColor = NSColor.black.cgColor
         imageLayer.isOpaque = true
         imageLayer.actions = [
             "contents": NSNull(),
             "bounds": NSNull(),
-            "position": NSNull()
+            "position": NSNull(),
+            "transform": NSNull()
         ]
-        layer?.addSublayer(imageLayer)
+        containerLayer.addSublayer(imageLayer)
 
-        // Right / Split compare image
+        // Split compare image layer
         splitLayer.contentsGravity = .resizeAspect
         splitLayer.backgroundColor = NSColor.black.cgColor
         splitLayer.isOpaque = true
@@ -118,25 +136,76 @@ public final class SlideView: NSView {
 
     public override func layout() {
         super.layout()
+        updateLayerLayout(animated: false)
+    }
+
+    private func updateLayerLayout(animated: Bool) {
         CATransaction.begin()
-        CATransaction.setDisableActions(true)
+        CATransaction.setDisableActions(!animated)
+        if animated {
+            CATransaction.setAnimationDuration(0.18)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+        }
+
         if isSplitMode {
             let halfWidth = bounds.width / 2
-            imageLayer.frame = CGRect(x: 0, y: 0, width: halfWidth - 1, height: bounds.height)
+            containerLayer.frame = CGRect(x: 0, y: 0, width: halfWidth - 1, height: bounds.height)
             splitLayer.frame = CGRect(x: halfWidth + 1, y: 0, width: halfWidth - 1, height: bounds.height)
+            imageLayer.frame = containerLayer.bounds
+            imageLayer.contentsGravity = .resizeAspect
         } else {
-            imageLayer.frame = bounds
+            containerLayer.frame = bounds
             splitLayer.frame = .zero
+
+            if isZoomed && currentImageSize.width > 0 && currentImageSize.height > 0 {
+                // 100% 1:1 Pixel Peep mode:
+                // Size layer to native image pixel dimensions scaled by backingScaleFactor
+                let scale = window?.backingScaleFactor ?? 2.0
+                let nativeW = currentImageSize.width / scale
+                let nativeH = currentImageSize.height / scale
+
+                imageLayer.contentsGravity = .resize
+                imageLayer.bounds = CGRect(x: 0, y: 0, width: nativeW, height: nativeH)
+
+                // Clamp panning offset so photo doesn't drift completely off-screen
+                let maxPanX = max(0, (nativeW - bounds.width) / 2)
+                let maxPanY = max(0, (nativeH - bounds.height) / 2)
+                zoomPanOffset.x = min(maxPanX, max(-maxPanX, zoomPanOffset.x))
+                zoomPanOffset.y = min(maxPanY, max(-maxPanY, zoomPanOffset.y))
+
+                imageLayer.position = CGPoint(
+                    x: (bounds.width / 2) + zoomPanOffset.x,
+                    y: (bounds.height / 2) + zoomPanOffset.y
+                )
+            } else {
+                // Fit to screen mode
+                imageLayer.contentsGravity = .resizeAspect
+                imageLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+                imageLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+                zoomPanOffset = .zero
+            }
         }
         CATransaction.commit()
     }
 
     // MARK: - Image Presentation
 
-    public func displayImage(_ cgImage: CGImage?, nextImage: CGImage? = nil, info: HudInfo?) {
+    public func displayImage(
+        _ cgImage: CGImage?,
+        nextImage: CGImage? = nil,
+        info: HudInfo?,
+        nativeSize: CGSize? = nil
+    ) {
+        if let size = nativeSize {
+            currentImageSize = size
+        } else if let img = cgImage {
+            currentImageSize = CGSize(width: img.width, height: img.height)
+        }
+
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         imageLayer.contents = cgImage
+
         if isSplitMode && nextImage != nil {
             splitLayer.contents = nextImage
             splitLayer.isHidden = false
@@ -146,6 +215,8 @@ public final class SlideView: NSView {
         }
         CATransaction.commit()
 
+        updateLayerLayout(animated: false)
+
         if let info = info {
             hudView.update(with: info)
         }
@@ -153,6 +224,7 @@ public final class SlideView: NSView {
 
     public func setSplitMode(_ enabled: Bool) {
         isSplitMode = enabled
+        if enabled { isZoomed = false }
         needsLayout = true
     }
 
@@ -174,6 +246,103 @@ public final class SlideView: NSView {
         quickHelpView.toggle()
     }
 
+    // MARK: - 100% Zoom & Pan Mechanics
+
+    public func setZoom(
+        _ zoomed: Bool,
+        anchorPointInView: CGPoint? = nil,
+        fullResImage: CGImage? = nil,
+        originalDimensions: CGSize? = nil
+    ) {
+        if let dims = originalDimensions {
+            currentImageSize = dims
+        }
+        if let fullImg = fullResImage {
+            imageLayer.contents = fullImg
+        }
+
+        guard isZoomed != zoomed else { return }
+        isZoomed = zoomed
+
+        if isZoomed {
+            // Center zoom around mouse cursor position
+            let mousePt = anchorPointInView ?? CGPoint(x: bounds.midX, y: bounds.midY)
+            let centerOffset = CGPoint(
+                x: bounds.midX - mousePt.x,
+                y: bounds.midY - mousePt.y
+            )
+
+            let scale = window?.backingScaleFactor ?? 2.0
+            let nativeW = currentImageSize.width / scale
+            let nativeH = currentImageSize.height / scale
+
+            // Ratio of native size vs viewport fit
+            let fitRatioX = nativeW / max(1, bounds.width)
+            let fitRatioY = nativeH / max(1, bounds.height)
+
+            zoomPanOffset = CGPoint(
+                x: centerOffset.x * fitRatioX,
+                y: centerOffset.y * fitRatioY
+            )
+        } else {
+            zoomPanOffset = .zero
+        }
+
+        updateLayerLayout(animated: true)
+    }
+
+    public override func mouseDown(with event: NSEvent) {
+        let mousePt = convert(event.locationInWindow, from: nil)
+        if !isZoomed {
+            // Click to zoom in
+            delegate?.slideViewRequestZoomToggle(mouseLocation: mousePt)
+        } else {
+            // Start panning
+            isDragging = true
+            dragStartMouse = mousePt
+            dragStartOffset = zoomPanOffset
+        }
+    }
+
+    public override func mouseDragged(with event: NSEvent) {
+        guard isZoomed && isDragging else { return }
+        let currentMouse = convert(event.locationInWindow, from: nil)
+        let deltaX = currentMouse.x - dragStartMouse.x
+        let deltaY = currentMouse.y - dragStartMouse.y
+
+        zoomPanOffset = CGPoint(
+            x: dragStartOffset.x + deltaX,
+            y: dragStartOffset.y + deltaY
+        )
+
+        updateLayerLayout(animated: false)
+    }
+
+    public override func mouseUp(with event: NSEvent) {
+        if isDragging {
+            let currentMouse = convert(event.locationInWindow, from: nil)
+            let dist = hypot(currentMouse.x - dragStartMouse.x, currentMouse.y - dragStartMouse.y)
+            isDragging = false
+
+            // If mouse didn't drag, treat as click to zoom out
+            if dist < 4.0 {
+                delegate?.slideViewRequestZoomToggle(mouseLocation: currentMouse)
+            }
+        }
+    }
+
+    public override func scrollWheel(with event: NSEvent) {
+        guard isZoomed else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        // Two-finger trackpad panning when zoomed in
+        zoomPanOffset.x += event.scrollingDeltaX
+        zoomPanOffset.y -= event.scrollingDeltaY
+        updateLayerLayout(animated: false)
+    }
+
     // MARK: - Keyboard Handling
 
     public override var acceptsFirstResponder: Bool {
@@ -183,8 +352,7 @@ public final class SlideView: NSView {
     public override func keyDown(with event: NSEvent) {
         resetCursorTimer()
 
-        // If quick help is visible, dismiss it on any key
-        if quickHelpView.alphaValue > 0.0 && event.keyCode != 44 { // 44 = '?' key
+        if quickHelpView.alphaValue > 0.0 && event.keyCode != 44 {
             quickHelpView.dismiss()
         }
 
@@ -193,22 +361,33 @@ public final class SlideView: NSView {
         switch event.keyCode {
         // Space, Right Arrow, Down Arrow, Page Down, 'N'
         case 49, 124, 125, 121, 45:
+            if isZoomed { setZoom(false) }
             delegate?.slideViewRequestNext()
 
         // Left Arrow, Up Arrow, Page Up, 'K'
         case 123, 126, 116, 40:
+            if isZoomed { setZoom(false) }
             delegate?.slideViewRequestPrevious()
 
         // Home
         case 115:
+            if isZoomed { setZoom(false) }
             delegate?.slideViewRequestFirst()
 
         // End
         case 119:
+            if isZoomed { setZoom(false) }
             delegate?.slideViewRequestLast()
 
-        // Delete / Backspace (51 = Backspace, 117 = Forward Delete)
+        // 'Z' key (KeyCode 6) -> 100% 1:1 Pixel Peep Zoom
+        case 6:
+            let mouseInWindow = window?.mouseLocationOutsideOfEventStream ?? CGPoint(x: bounds.midX, y: bounds.midY)
+            let localPt = convert(mouseInWindow, from: nil)
+            delegate?.slideViewRequestZoomToggle(mouseLocation: localPt)
+
+        // Delete / Backspace
         case 51, 117:
+            if isZoomed { setZoom(false) }
             if isShift {
                 delegate?.slideViewRequestPurgeRejects()
             } else {
@@ -216,35 +395,22 @@ public final class SlideView: NSView {
             }
 
         // --- CULLING HOTKEYS ---
-        // 'P' key (KeyCode 35) -> Flag as Pick
-        case 35:
+        case 35: // 'P'
             delegate?.slideViewSetPick(.pick)
-
-        // 'X' key (KeyCode 7) -> Flag as Reject
-        case 7:
+        case 7:  // 'X'
             delegate?.slideViewSetPick(.reject)
-
-        // 'U' key (KeyCode 32) -> Unflag / Neutral
-        case 32:
+        case 32: // 'U'
             delegate?.slideViewSetPick(.unflagged)
-
-        // 'C' key (KeyCode 8) -> Toggle Auto-Advance mode
-        case 8:
+        case 8:  // 'C'
             delegate?.slideViewToggleAutoAdvance()
-
-        // 'S' key (KeyCode 1) or Tab (KeyCode 48) -> Split 2-up compare mode
-        case 1, 48:
+        case 1, 48: // 'S' or Tab
             delegate?.slideViewToggleSplitCompare()
-
-        // Backslash '\' key (KeyCode 42) -> Cycle Filter
-        case 42:
+        case 42: // '\'
             delegate?.slideViewCycleFilter()
-
-        // '?' or '/' key (KeyCode 44) or 'H' key (KeyCode 4) -> Toggle Shortcuts Sheet
-        case 44, 4:
+        case 44, 4: // '?' or 'H'
             toggleHelp()
 
-        // Number Keys 0..5 (Star Ratings) & 6..9 (Color Labels)
+        // Numbers 0..5 (Stars) & 6..9 (Colors)
         case 29:
             delegate?.slideViewSetRating(0)
         case 18:
@@ -258,30 +424,23 @@ public final class SlideView: NSView {
         case 23:
             delegate?.slideViewSetRating(5)
 
-        // 6 key (KeyCode 22) -> Red
-        case 22:
+        case 22: // 6 -> Red
             delegate?.slideViewSetColor(.red)
-        // 7 key (KeyCode 26) -> Yellow
-        case 26:
+        case 26: // 7 -> Yellow
             delegate?.slideViewSetColor(.yellow)
-        // 8 key (KeyCode 28) -> Green
-        case 28:
+        case 28: // 8 -> Green
             delegate?.slideViewSetColor(.green)
-        // 9 key (KeyCode 25) -> Blue
-        case 25:
+        case 25: // 9 -> Blue
             delegate?.slideViewSetColor(.blue)
 
-        // 'F' key (KeyCode 3) -> Fullscreen toggle
-        case 3:
+        case 3: // 'F'
             delegate?.slideViewToggleFullScreen()
-
-        // 'I' key (KeyCode 34) -> Info HUD toggle
-        case 34:
+        case 34: // 'I'
             toggleHud()
-
-        // Escape (KeyCode 53) or 'Q' (KeyCode 12)
-        case 53, 12:
-            if quickHelpView.alphaValue > 0.0 {
+        case 53, 12: // Esc or 'Q'
+            if isZoomed {
+                setZoom(false)
+            } else if quickHelpView.alphaValue > 0.0 {
                 quickHelpView.dismiss()
             } else {
                 delegate?.slideViewClose()
