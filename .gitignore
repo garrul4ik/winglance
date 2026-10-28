@@ -1,6 +1,20 @@
+# .NET build and publish artifacts
+bin/
+obj/
+publish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# OS files
 .DS_Store
-.build/
-Glance.app/
+Thumbs.db
+desktop.ini
+
+# Mac / temporary
+ref/glance-mac/.build/
+ref/glance-mac/Glance.app/
 *.swp
 *~
 *.zip
