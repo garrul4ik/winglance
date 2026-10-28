@@ -263,6 +263,7 @@ public final class SlideView: NSView {
 
         guard isZoomed != zoomed else { return }
         isZoomed = zoomed
+        hudView.updateZoomState(isZoomed)
 
         if isZoomed {
             // Center zoom around mouse cursor position

@@ -172,7 +172,8 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
                 isDownscaled: decoded.isDownscaled,
                 culling: meta,
                 autoAdvance: autoAdvance,
-                filterTitle: filterBadge
+                filterTitle: filterBadge,
+                isZoomed: slideView.isZoomed
             )
 
             let nativeSize = CGSize(width: decoded.originalWidth, height: decoded.originalHeight)
@@ -315,10 +316,8 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
     public func slideViewRequestZoomToggle(mouseLocation: CGPoint) {
         if slideView.isZoomed {
             slideView.setZoom(false)
-            slideView.hudView.showMessage("Fit to Screen [Z]")
         } else {
             guard let rawIndex = currentRawIndex else { return }
-            slideView.hudView.showMessage("100% Actual Pixels [Z]")
 
             // Instantly zoom the view using the screen-bounded layer first (0ms latency!)
             slideView.setZoom(true, anchorPointInView: mouseLocation)

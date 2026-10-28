@@ -11,6 +11,7 @@ public struct HudInfo: Sendable {
     public let culling: CullingMetadata
     public let autoAdvance: Bool
     public let filterTitle: String?
+    public let isZoomed: Bool
     public let errorMessage: String?
 
     public init(
@@ -24,6 +25,7 @@ public struct HudInfo: Sendable {
         culling: CullingMetadata = CullingMetadata(),
         autoAdvance: Bool = false,
         filterTitle: String? = nil,
+        isZoomed: Bool = false,
         errorMessage: String? = nil
     ) {
         self.currentIndex = currentIndex
@@ -36,6 +38,7 @@ public struct HudInfo: Sendable {
         self.culling = culling
         self.autoAdvance = autoAdvance
         self.filterTitle = filterTitle
+        self.isZoomed = isZoomed
         self.errorMessage = errorMessage
     }
 }
@@ -65,7 +68,11 @@ public final class GlassHudView: NSView {
     private let filterPill = NSView()
     private let filterLabel = NSTextField(labelWithString: "")
 
+    private let zoomPill = NSView()
+    private let zoomLabel = NSTextField(labelWithString: "100%")
+
     private let stackView = NSStackView()
+    private var lastInfo: HudInfo?
 
     private var fadeTimer: Timer?
     public var isPersistentlyVisible: Bool = false {
@@ -263,6 +270,29 @@ public final class GlassHudView: NSView {
         ])
         stackView.addArrangedSubview(filterPill)
 
+        // 9. Zoom 100% Indicator Pill
+        zoomPill.wantsLayer = true
+        zoomPill.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.2).cgColor
+        zoomPill.layer?.borderColor = NSColor.white.withAlphaComponent(0.4).cgColor
+        zoomPill.layer?.borderWidth = 0.5
+        zoomPill.layer?.cornerRadius = 5
+        zoomPill.layer?.cornerCurve = .continuous
+        zoomPill.translatesAutoresizingMaskIntoConstraints = false
+
+        zoomLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
+        zoomLabel.textColor = NSColor(white: 0.95, alpha: 1.0)
+        zoomLabel.alignment = .center
+        zoomLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        zoomPill.addSubview(zoomLabel)
+        NSLayoutConstraint.activate([
+            zoomLabel.topAnchor.constraint(equalTo: zoomPill.topAnchor, constant: 2),
+            zoomLabel.bottomAnchor.constraint(equalTo: zoomPill.bottomAnchor, constant: -2),
+            zoomLabel.leadingAnchor.constraint(equalTo: zoomPill.leadingAnchor, constant: 6),
+            zoomLabel.trailingAnchor.constraint(equalTo: zoomPill.trailingAnchor, constant: -6)
+        ])
+        stackView.addArrangedSubview(zoomPill)
+
         NSLayoutConstraint.activate([
             stackView.topAnchor.constraint(equalTo: visualEffectView.topAnchor),
             stackView.bottomAnchor.constraint(equalTo: visualEffectView.bottomAnchor),
@@ -291,6 +321,7 @@ public final class GlassHudView: NSView {
 
     /// Updates the HUD contents with culling indicators.
     public func update(with info: HudInfo) {
+        self.lastInfo = info
         if info.totalCount > 0 {
             indexLabel.stringValue = "\(info.currentIndex + 1) / \(info.totalCount)"
             indexPill.isHidden = false
@@ -357,6 +388,32 @@ public final class GlassHudView: NSView {
             rawBadge.isHidden = !info.isRaw
         }
 
+        // 100% Zoom Pill
+        zoomPill.isHidden = !info.isZoomed
+
+        pulse()
+    }
+
+    /// Updates only the zoom status without clearing or re-rendering other photo metadata
+    public func updateZoomState(_ isZoomed: Bool) {
+        zoomPill.isHidden = !isZoomed
+        if let current = lastInfo {
+            let updated = HudInfo(
+                currentIndex: current.currentIndex,
+                totalCount: current.totalCount,
+                filename: current.filename,
+                dimensions: current.dimensions,
+                fileSize: current.fileSize,
+                isRaw: current.isRaw,
+                isDownscaled: current.isDownscaled,
+                culling: current.culling,
+                autoAdvance: current.autoAdvance,
+                filterTitle: current.filterTitle,
+                isZoomed: isZoomed,
+                errorMessage: current.errorMessage
+            )
+            self.lastInfo = updated
+        }
         pulse()
     }
 
