@@ -550,6 +550,37 @@ public final class GlassHudView: NSView {
         pulse()
     }
 
+    /// Updates only the slideshow status and interval badge without clearing other metadata
+    public func updateSlideshowState(isActive: Bool, interval: Double) {
+        slideshowPill.isHidden = !isActive
+        if isActive {
+            slideshowLabel.stringValue = "SLIDESHOW \(Int(interval))s"
+        }
+        if let current = lastInfo {
+            let updated = HudInfo(
+                currentIndex: current.currentIndex,
+                totalCount: current.totalCount,
+                filename: current.filename,
+                dimensions: current.dimensions,
+                fileSize: current.fileSize,
+                isRaw: current.isRaw,
+                isStacked: current.isStacked,
+                isDownscaled: current.isDownscaled,
+                culling: current.culling,
+                autoAdvance: current.autoAdvance,
+                filterTitle: current.filterTitle,
+                isZoomed: current.isZoomed,
+                errorMessage: current.errorMessage,
+                exif: current.exif,
+                isSlideshow: isActive,
+                slideshowInterval: interval,
+                exportProgressText: current.exportProgressText
+            )
+            self.lastInfo = updated
+        }
+        pulse()
+    }
+
     /// Updates only the zoom status without clearing or re-rendering other photo metadata
     public func updateZoomState(_ isZoomed: Bool) {
         zoomPill.isHidden = !isZoomed

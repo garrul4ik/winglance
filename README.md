@@ -57,7 +57,7 @@
 | 📷 **Dedicated Frosted EXIF HUD (`I`)** | Displays lens model, camera body, shutter speed, aperture, ISO, focal length, and capture date in a clean glass overlay. |
 | 🔄 **Lossless EXIF Rotation (`R` / `]` and `L` / `[` )** | Rotates JPEGs, HEICs, and RAW XMP sidecars in 90° increments without re-compressing pixels. |
 | 📦 **One-Key Quick Export (`E`)** | Copies all flagged Picks (or current photo) and companion sidecars to `./Picks` with sound confirmation and Finder reveal. |
-| 📽️ **Hands-Free Slideshow (`Return`)** | Full-screen automated slideshow with instant interruption on any user interaction. |
+| 📽️ **Hands-Free Slideshow (`Return`)** | Full-screen automated slideshow with live `+` / `-` speed stepping (1s to 30s) and instant pause on any interaction. |
 | 🪶 **Zero Bloat, Zero Electron** | Pure native Swift & AppKit, compiling down to a lightweight standalone binary without web runtimes. |
 
 ---
@@ -99,6 +99,7 @@ Press **`?`** (`Shift + /`) at any time inside Glance to toggle the interactive 
 | **`L`** or **`[`** | **Rotate CCW ↶** | Lossless 90° counter-clockwise rotation |
 | **`E`** | **Quick Export 📦** | Copies all Picks (or current photo) to `./Picks` folder |
 | **`Return`** | **Slideshow 📽️** | Start/stop automated hands-free slideshow |
+| **`+`** / **`-`** | **Slideshow Speed ⏱️** | Increase / decrease slideshow interval at set steps (1s – 30s) |
 | **`Delete`** / **`Backspace`** | **Trash 🗑️** | Move active file (and its RAW / XMP pair) to macOS Trash |
 | **`Shift + Delete`** | **Purge Rejects 💥** | Safely batch moves all rejected (`X`) images to macOS Trash |
 

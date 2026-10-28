@@ -610,24 +610,37 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
         guard isSlideshowActive else { return }
         isSlideshowActive = false
         stopSlideshowTimer()
-        slideView.hudView.showMessage("Slideshow Stopped")
-        Task {
-            await loadAndDisplayCurrent()
-        }
+        slideView.hudView.updateSlideshowState(isActive: false, interval: slideshowInterval)
     }
 
     public func slideViewToggleSlideshow() {
         isSlideshowActive.toggle()
         if isSlideshowActive {
             startSlideshowTimer()
-            slideView.hudView.showMessage("Slideshow: ON (\(Int(slideshowInterval))s) [Return]")
+            slideView.hudView.updateSlideshowState(isActive: true, interval: slideshowInterval)
         } else {
             stopSlideshowTimer()
-            slideView.hudView.showMessage("Slideshow: OFF [Return]")
+            slideView.hudView.updateSlideshowState(isActive: false, interval: slideshowInterval)
         }
-        Task {
-            await loadAndDisplayCurrent()
+    }
+
+    public func slideViewAdjustSlideshowInterval(increase: Bool) {
+        guard isSlideshowActive else { return }
+
+        let steps: [Double] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 20.0, 30.0]
+
+        if increase {
+            if let next = steps.first(where: { $0 > slideshowInterval }) {
+                slideshowInterval = next
+            }
+        } else {
+            if let prev = steps.last(where: { $0 < slideshowInterval }) {
+                slideshowInterval = prev
+            }
         }
+
+        startSlideshowTimer()
+        slideView.hudView.updateSlideshowState(isActive: true, interval: slideshowInterval)
     }
 
     private func startSlideshowTimer() {

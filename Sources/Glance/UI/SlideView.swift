@@ -35,6 +35,7 @@ public protocol SlideViewDelegate: AnyObject {
     func slideViewRotate(direction: RotationDirection)
     func slideViewToggleSlideshow()
     func slideViewStopSlideshow()
+    func slideViewAdjustSlideshowInterval(increase: Bool)
 }
 
 /// Ultra-responsive, zero-latency layer-backed NSView.
@@ -598,6 +599,16 @@ public final class SlideView: NSView {
         // Slideshow Toggle: Return / Enter
         if lower == "\r" || event.keyCode == 36 || event.keyCode == 76 {
             delegate?.slideViewToggleSlideshow()
+            return
+        }
+
+        // Slideshow Interval Adjust: "+" / "=" to increase, "-" / "_" to decrease
+        if chars == "+" || chars == "=" || event.keyCode == 24 || event.keyCode == 69 {
+            delegate?.slideViewAdjustSlideshowInterval(increase: true)
+            return
+        }
+        if chars == "-" || chars == "_" || event.keyCode == 27 || event.keyCode == 78 {
+            delegate?.slideViewAdjustSlideshowInterval(increase: false)
             return
         }
 

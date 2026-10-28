@@ -93,7 +93,7 @@ public final class QuickHelpView: NSView {
         col1.addArrangedSubview(makeRow(key: "6 – 9", desc: "Color label"))
         col1.addArrangedSubview(makeRow(key: "C", desc: "Auto-advance"))
         col1.addArrangedSubview(makeRow(key: "E", desc: "Export picks"))
-        col1.addArrangedSubview(makeRow(key: "[ / ]", desc: "Rotate 90°"))
+        col1.addArrangedSubview(makeRow(key: "R / L", desc: "Rotate 90°"))
         columns.addArrangedSubview(col1)
 
         // Column 2: Review & Navigation
@@ -108,6 +108,7 @@ public final class QuickHelpView: NSView {
         col2.addArrangedSubview(makeRow(key: "O", desc: "Clipping warning"))
         col2.addArrangedSubview(makeRow(key: "I", desc: "EXIF Info"))
         col2.addArrangedSubview(makeRow(key: "Return", desc: "Slideshow"))
+        col2.addArrangedSubview(makeRow(key: "+ / -", desc: "Slideshow speed"))
         col2.addArrangedSubview(makeRow(key: "\\", desc: "Cycle filter"))
         col2.addArrangedSubview(makeRow(key: "⇧ ⌫", desc: "Purge rejects"))
         col2.addArrangedSubview(makeRow(key: "Space", desc: "Next"))
