@@ -13,12 +13,13 @@ public struct ScanResult: Sendable {
     }
 }
 
-/// Asynchronous directory scanner that gathers and natural-sorts sibling image files off the main thread.
+/// Asynchronous directory scanner that gathers, sibling-stacks (RAW + JPEG),
+/// and natural-sorts image files off the main thread.
 public actor DirectoryScanner {
     public init() {}
 
     /// Scans the directory containing `targetURL` (or `targetURL` itself if it is a directory)
-    /// and finds all supported images, returning them with natural alphanumeric sorting.
+    /// and finds all supported images, automatically grouping paired RAW + JPEG shots into single slides.
     public func scan(targetURL: URL) async throws -> ScanResult {
         return try await Task.detached(priority: .userInitiated) {
             let fileManager = FileManager.default
@@ -53,8 +54,15 @@ public actor DirectoryScanner {
                 options: [.skipsHiddenFiles]
             )
 
-            // Filter for supported images and map to SlideItem
-            var items: [SlideItem] = []
+            // Group supported files by lowercase stem (e.g. "_dsc0001")
+            struct FileEntry {
+                let url: URL
+                let size: Int64
+                let isRaw: Bool
+            }
+
+            var groups: [String: [FileEntry]] = [:]
+
             for fileURL in contents {
                 guard SupportedFormats.isSupported(url: fileURL) else { continue }
 
@@ -68,7 +76,57 @@ public actor DirectoryScanner {
                     fileSize = Int64(resourceValues.fileSize ?? 0)
                 }
 
-                items.append(SlideItem(url: fileURL, fileSize: fileSize))
+                let isRaw = SupportedFormats.isRaw(url: fileURL)
+                let stem = fileURL.deletingPathExtension().lastPathComponent.lowercased()
+
+                let entry = FileEntry(url: fileURL, size: fileSize, isRaw: isRaw)
+                if groups[stem] == nil {
+                    groups[stem] = [entry]
+                } else {
+                    groups[stem]?.append(entry)
+                }
+            }
+
+            // Build SlideItems, pairing RAW + companion standard images
+            var items: [SlideItem] = []
+
+            for (_, entries) in groups {
+                let rawEntries = entries.filter { $0.isRaw }
+                let standardEntries = entries.filter { !$0.isRaw }
+                let allURLs = entries.map { $0.url }
+                let totalSize = entries.reduce(Int64(0)) { $0 + $1.size }
+
+                if let raw = rawEntries.first, let companion = standardEntries.first {
+                    // Stacking: Use fast companion JPEG for screen-bounded preview, link master RAW
+                    items.append(SlideItem(
+                        url: companion.url,
+                        rawURL: raw.url,
+                        companionURL: companion.url,
+                        allURLs: allURLs,
+                        fileSize: companion.size,
+                        totalStackSize: totalSize
+                    ))
+                } else if let raw = rawEntries.first {
+                    // RAW only
+                    items.append(SlideItem(
+                        url: raw.url,
+                        rawURL: raw.url,
+                        companionURL: nil,
+                        allURLs: allURLs,
+                        fileSize: raw.size,
+                        totalStackSize: totalSize
+                    ))
+                } else if let standard = standardEntries.first {
+                    // Standard image only (JPEG / PNG / HEIC)
+                    items.append(SlideItem(
+                        url: standard.url,
+                        rawURL: nil,
+                        companionURL: nil,
+                        allURLs: allURLs,
+                        fileSize: standard.size,
+                        totalStackSize: totalSize
+                    ))
+                }
             }
 
             // Natural alphanumeric sort (e.g., photo1, photo2, photo10 instead of photo1, photo10, photo2)
@@ -76,10 +134,14 @@ public actor DirectoryScanner {
                 $0.filename.localizedStandardCompare($1.filename) == .orderedAscending
             }
 
-            // Find index of the clicked file
+            // Find index of the clicked file (matches either the RAW or companion file in the stack)
             var initialIndex = 0
             if let selected = selectedFilename {
-                if let foundIndex = items.firstIndex(where: { $0.filename == selected }) {
+                if let foundIndex = items.firstIndex(where: { item in
+                    item.allURLs.contains(where: {
+                        $0.lastPathComponent.localizedCaseInsensitiveCompare(selected) == .orderedSame
+                    })
+                }) {
                     initialIndex = foundIndex
                 }
             }

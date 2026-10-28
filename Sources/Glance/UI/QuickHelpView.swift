@@ -90,7 +90,10 @@ public final class QuickHelpView: NSView {
         col1.addArrangedSubview(makeRow(key: "U", desc: "Unflag"))
         col1.addArrangedSubview(makeRow(key: "1 – 5", desc: "Rating"))
         col1.addArrangedSubview(makeRow(key: "0", desc: "Clear"))
+        col1.addArrangedSubview(makeRow(key: "6 – 9", desc: "Color label"))
         col1.addArrangedSubview(makeRow(key: "C", desc: "Auto-advance"))
+        col1.addArrangedSubview(makeRow(key: "E", desc: "Export picks"))
+        col1.addArrangedSubview(makeRow(key: "[ / ]", desc: "Rotate 90°"))
         columns.addArrangedSubview(col1)
 
         // Column 2: Review & Navigation
@@ -101,11 +104,15 @@ public final class QuickHelpView: NSView {
         col2.translatesAutoresizingMaskIntoConstraints = false
         col2.addArrangedSubview(makeRow(key: "Z", desc: "100% Zoom / Pan"))
         col2.addArrangedSubview(makeRow(key: "S", desc: "Split compare"))
+        col2.addArrangedSubview(makeRow(key: "H", desc: "RGB Histogram"))
+        col2.addArrangedSubview(makeRow(key: "O", desc: "Clipping warning"))
+        col2.addArrangedSubview(makeRow(key: "I", desc: "EXIF Info"))
+        col2.addArrangedSubview(makeRow(key: "Return", desc: "Slideshow"))
         col2.addArrangedSubview(makeRow(key: "\\", desc: "Cycle filter"))
         col2.addArrangedSubview(makeRow(key: "⇧ ⌫", desc: "Purge rejects"))
         col2.addArrangedSubview(makeRow(key: "Space", desc: "Next"))
         col2.addArrangedSubview(makeRow(key: "F", desc: "Full screen"))
-        col2.addArrangedSubview(makeRow(key: "I", desc: "Info overlay"))
+        col2.addArrangedSubview(makeRow(key: "?", desc: "Shortcuts"))
         columns.addArrangedSubview(col2)
 
         root.addArrangedSubview(columns)
@@ -116,7 +123,7 @@ public final class QuickHelpView: NSView {
             root.leadingAnchor.constraint(equalTo: visualEffectView.leadingAnchor),
             root.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor),
 
-            col2.widthAnchor.constraint(greaterThanOrEqualToConstant: 165)
+            col2.widthAnchor.constraint(greaterThanOrEqualToConstant: 175)
         ])
     }
 

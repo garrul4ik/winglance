@@ -7,12 +7,17 @@ public struct HudInfo: Sendable {
     public let dimensions: String?
     public let fileSize: String?
     public let isRaw: Bool
+    public let isStacked: Bool
     public let isDownscaled: Bool
     public let culling: CullingMetadata
     public let autoAdvance: Bool
     public let filterTitle: String?
     public let isZoomed: Bool
     public let errorMessage: String?
+    public let exif: ExifMetadata?
+    public let isSlideshow: Bool
+    public let slideshowInterval: Double
+    public let exportProgressText: String?
 
     public init(
         currentIndex: Int,
@@ -21,12 +26,17 @@ public struct HudInfo: Sendable {
         dimensions: String? = nil,
         fileSize: String? = nil,
         isRaw: Bool = false,
+        isStacked: Bool = false,
         isDownscaled: Bool = false,
         culling: CullingMetadata = CullingMetadata(),
         autoAdvance: Bool = false,
         filterTitle: String? = nil,
         isZoomed: Bool = false,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        exif: ExifMetadata? = nil,
+        isSlideshow: Bool = false,
+        slideshowInterval: Double = 3.0,
+        exportProgressText: String? = nil
     ) {
         self.currentIndex = currentIndex
         self.totalCount = totalCount
@@ -34,12 +44,17 @@ public struct HudInfo: Sendable {
         self.dimensions = dimensions
         self.fileSize = fileSize
         self.isRaw = isRaw
+        self.isStacked = isStacked
         self.isDownscaled = isDownscaled
         self.culling = culling
         self.autoAdvance = autoAdvance
         self.filterTitle = filterTitle
         self.isZoomed = isZoomed
         self.errorMessage = errorMessage
+        self.exif = exif
+        self.isSlideshow = isSlideshow
+        self.slideshowInterval = slideshowInterval
+        self.exportProgressText = exportProgressText
     }
 }
 
@@ -53,6 +68,9 @@ public final class GlassHudView: NSView {
 
     private let pickBadge = NSView()
     private let pickLabel = NSTextField(labelWithString: "")
+
+    private let colorBadge = NSView()
+    private let colorLabel = NSTextField(labelWithString: "")
 
     private let ratingLabel = NSTextField(labelWithString: "")
 
@@ -70,6 +88,12 @@ public final class GlassHudView: NSView {
 
     private let zoomPill = NSView()
     private let zoomLabel = NSTextField(labelWithString: "100%")
+
+    private let slideshowPill = NSView()
+    private let slideshowLabel = NSTextField(labelWithString: "SLIDESHOW")
+
+    private let exportPill = NSView()
+    private let exportLabel = NSTextField(labelWithString: "")
 
     private let stackView = NSStackView()
     private var lastInfo: HudInfo?
@@ -182,6 +206,25 @@ public final class GlassHudView: NSView {
         ])
         stackView.addArrangedSubview(pickBadge)
 
+        // 2b. Color Label Badge (RED / YELLOW / GREEN / BLUE)
+        colorBadge.wantsLayer = true
+        colorBadge.layer?.cornerRadius = 6
+        colorBadge.layer?.cornerCurve = .continuous
+        colorBadge.translatesAutoresizingMaskIntoConstraints = false
+
+        colorLabel.font = NSFont.systemFont(ofSize: 10, weight: .bold)
+        colorLabel.alignment = .center
+        colorLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        colorBadge.addSubview(colorLabel)
+        NSLayoutConstraint.activate([
+            colorLabel.topAnchor.constraint(equalTo: colorBadge.topAnchor, constant: 2),
+            colorLabel.bottomAnchor.constraint(equalTo: colorBadge.bottomAnchor, constant: -2),
+            colorLabel.leadingAnchor.constraint(equalTo: colorBadge.leadingAnchor, constant: 6),
+            colorLabel.trailingAnchor.constraint(equalTo: colorBadge.trailingAnchor, constant: -6)
+        ])
+        stackView.addArrangedSubview(colorBadge)
+
         // 3. Star Rating (★ ★ ★ ☆ ☆)
         ratingLabel.font = NSFont.systemFont(ofSize: 12, weight: .bold)
         ratingLabel.textColor = NSColor.systemYellow
@@ -201,7 +244,7 @@ public final class GlassHudView: NSView {
         metaLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         stackView.addArrangedSubview(metaLabel)
 
-        // 6. RAW Badge
+        // 6. RAW / Stack Badge
         rawBadge.wantsLayer = true
         rawBadge.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.25).cgColor
         rawBadge.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.55).cgColor
@@ -293,6 +336,54 @@ public final class GlassHudView: NSView {
         ])
         stackView.addArrangedSubview(zoomPill)
 
+        // 10. Slideshow Mode Pill
+        slideshowPill.wantsLayer = true
+        slideshowPill.layer?.backgroundColor = NSColor.systemTeal.withAlphaComponent(0.25).cgColor
+        slideshowPill.layer?.borderColor = NSColor.systemTeal.withAlphaComponent(0.55).cgColor
+        slideshowPill.layer?.borderWidth = 0.5
+        slideshowPill.layer?.cornerRadius = 5
+        slideshowPill.layer?.cornerCurve = .continuous
+        slideshowPill.translatesAutoresizingMaskIntoConstraints = false
+
+        slideshowPill.isHidden = true
+        slideshowLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
+        slideshowLabel.textColor = NSColor.systemTeal
+        slideshowLabel.alignment = .center
+        slideshowLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        slideshowPill.addSubview(slideshowLabel)
+        NSLayoutConstraint.activate([
+            slideshowLabel.topAnchor.constraint(equalTo: slideshowPill.topAnchor, constant: 2),
+            slideshowLabel.bottomAnchor.constraint(equalTo: slideshowPill.bottomAnchor, constant: -2),
+            slideshowLabel.leadingAnchor.constraint(equalTo: slideshowPill.leadingAnchor, constant: 6),
+            slideshowLabel.trailingAnchor.constraint(equalTo: slideshowPill.trailingAnchor, constant: -6)
+        ])
+        stackView.addArrangedSubview(slideshowPill)
+
+        // 11. Export Progress Pill
+        exportPill.wantsLayer = true
+        exportPill.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.25).cgColor
+        exportPill.layer?.borderColor = NSColor.systemGreen.withAlphaComponent(0.55).cgColor
+        exportPill.layer?.borderWidth = 0.5
+        exportPill.layer?.cornerRadius = 5
+        exportPill.layer?.cornerCurve = .continuous
+        exportPill.translatesAutoresizingMaskIntoConstraints = false
+
+        exportPill.isHidden = true
+        exportLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .bold)
+        exportLabel.textColor = NSColor.systemGreen
+        exportLabel.alignment = .center
+        exportLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        exportPill.addSubview(exportLabel)
+        NSLayoutConstraint.activate([
+            exportLabel.topAnchor.constraint(equalTo: exportPill.topAnchor, constant: 2),
+            exportLabel.bottomAnchor.constraint(equalTo: exportPill.bottomAnchor, constant: -2),
+            exportLabel.leadingAnchor.constraint(equalTo: exportPill.leadingAnchor, constant: 6),
+            exportLabel.trailingAnchor.constraint(equalTo: exportPill.trailingAnchor, constant: -6)
+        ])
+        stackView.addArrangedSubview(exportPill)
+
         NSLayoutConstraint.activate([
             stackView.topAnchor.constraint(equalTo: visualEffectView.topAnchor),
             stackView.bottomAnchor.constraint(equalTo: visualEffectView.bottomAnchor),
@@ -349,6 +440,40 @@ public final class GlassHudView: NSView {
             pickBadge.isHidden = true
         }
 
+        // Culling: Color Label
+        switch info.culling.color {
+        case .red:
+            colorLabel.stringValue = "RED"
+            colorLabel.textColor = NSColor.systemRed
+            colorBadge.layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.25).cgColor
+            colorBadge.layer?.borderColor = NSColor.systemRed.withAlphaComponent(0.6).cgColor
+            colorBadge.layer?.borderWidth = 0.5
+            colorBadge.isHidden = false
+        case .yellow:
+            colorLabel.stringValue = "YELLOW"
+            colorLabel.textColor = NSColor.systemYellow
+            colorBadge.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.25).cgColor
+            colorBadge.layer?.borderColor = NSColor.systemYellow.withAlphaComponent(0.6).cgColor
+            colorBadge.layer?.borderWidth = 0.5
+            colorBadge.isHidden = false
+        case .green:
+            colorLabel.stringValue = "GREEN"
+            colorLabel.textColor = NSColor.systemGreen
+            colorBadge.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.25).cgColor
+            colorBadge.layer?.borderColor = NSColor.systemGreen.withAlphaComponent(0.6).cgColor
+            colorBadge.layer?.borderWidth = 0.5
+            colorBadge.isHidden = false
+        case .blue:
+            colorLabel.stringValue = "BLUE"
+            colorLabel.textColor = NSColor.systemBlue
+            colorBadge.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.25).cgColor
+            colorBadge.layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.6).cgColor
+            colorBadge.layer?.borderWidth = 0.5
+            colorBadge.isHidden = false
+        case .none:
+            colorBadge.isHidden = true
+        }
+
         // Culling: Star Rating
         if info.culling.rating > 0 {
             let stars = String(repeating: "★", count: info.culling.rating) + String(repeating: "☆", count: 5 - info.culling.rating)
@@ -377,6 +502,9 @@ public final class GlassHudView: NSView {
             rawBadge.isHidden = true
         } else {
             var parts: [String] = []
+            if let exp = info.exif?.exposureSummary, !exp.isEmpty {
+                parts.append(exp)
+            }
             if let dim = info.dimensions {
                 parts.append(dim)
             }
@@ -385,11 +513,39 @@ public final class GlassHudView: NSView {
             }
             metaLabel.stringValue = parts.joined(separator: "  •  ")
             metaLabel.textColor = NSColor(white: 0.75, alpha: 1.0)
-            rawBadge.isHidden = !info.isRaw
+
+            // RAW / Stack Badge
+            if info.isStacked {
+                rawLabel.stringValue = "RAW + JPG"
+                rawBadge.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.25).cgColor
+                rawBadge.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.55).cgColor
+                rawBadge.isHidden = false
+            } else if info.isRaw {
+                rawLabel.stringValue = "RAW"
+                rawBadge.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.25).cgColor
+                rawBadge.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.55).cgColor
+                rawBadge.isHidden = false
+            } else {
+                rawBadge.isHidden = true
+            }
         }
 
         // 100% Zoom Pill
         zoomPill.isHidden = !info.isZoomed
+
+        // Slideshow Mode Pill
+        slideshowPill.isHidden = !info.isSlideshow
+        if info.isSlideshow {
+            slideshowLabel.stringValue = "SLIDESHOW \(Int(info.slideshowInterval))s"
+        }
+
+        // Export Progress Pill
+        if let expText = info.exportProgressText {
+            exportLabel.stringValue = expText
+            exportPill.isHidden = false
+        } else {
+            exportPill.isHidden = true
+        }
 
         pulse()
     }
@@ -405,6 +561,7 @@ public final class GlassHudView: NSView {
                 dimensions: current.dimensions,
                 fileSize: current.fileSize,
                 isRaw: current.isRaw,
+                isStacked: current.isStacked,
                 isDownscaled: current.isDownscaled,
                 culling: current.culling,
                 autoAdvance: current.autoAdvance,
@@ -420,6 +577,7 @@ public final class GlassHudView: NSView {
     public func showMessage(_ message: String) {
         indexPill.isHidden = true
         pickBadge.isHidden = true
+        colorBadge.isHidden = true
         ratingLabel.isHidden = true
         rawBadge.isHidden = true
         autoPill.isHidden = true

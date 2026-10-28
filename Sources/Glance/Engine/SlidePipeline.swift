@@ -98,6 +98,7 @@ public actor SlidePipeline {
     }
 
     /// Retrieves the 100% full-resolution unconstrained 1:1 image for pixel peeping.
+    /// If the item is a stacked RAW + JPEG shot, inspects the master RAW sensor bits.
     public func getFullResolutionImage(at index: Int) async throws -> DecodedImage {
         guard index >= 0 && index < items.count else {
             throw NSError(domain: "SlidePipeline", code: 404, userInfo: [
@@ -105,8 +106,10 @@ public actor SlidePipeline {
             ])
         }
 
-        // 1. If screen-bounded image is already not downscaled (original was smaller than screen), reuse it!
-        if let cached = cache[index], !cached.isDownscaled {
+        let item = items[index]
+
+        // 1. If not stacked and screen-bounded image is already not downscaled, reuse it!
+        if !item.isStacked, let cached = cache[index], !cached.isDownscaled {
             return cached
         }
 
@@ -123,13 +126,14 @@ public actor SlidePipeline {
         // Cancel previous full-res task if user moved to another photo
         inFlightFullResTask?.task.cancel()
 
-        let item = items[index]
         let decoder = self.decoder
+        // For stacked shots, decode 100% actual device pixels from the master RAW file!
+        let targetURL = item.rawURL ?? item.url
 
         let task = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             // Passing 0 or nil requests 100% unconstrained native sensor resolution
-            return try decoder.decode(at: item.url, maxBoundingPixelSize: 0)
+            return try decoder.decode(at: targetURL, maxBoundingPixelSize: 0)
         }
 
         inFlightFullResTask = (index: index, task: task)
@@ -202,6 +206,14 @@ public actor SlidePipeline {
 
         pruneAndPreload(around: currentIndex, direction: .forward)
         return currentIndex
+    }
+
+    /// Invalidates cached decoded representations for a specific item (e.g. after lossless rotation).
+    public func invalidateCache(at index: Int) {
+        cache.removeValue(forKey: index)
+        fullResCache.removeValue(forKey: index)
+        inFlightTasks[index]?.cancel()
+        inFlightTasks.removeValue(forKey: index)
     }
 
     /// Batch removes items at the given indices.

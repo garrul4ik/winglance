@@ -18,6 +18,19 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
     private var autoAdvance: Bool = false
     private var isDeleting: Bool = false
 
+    // Phase 3: Histogram & Clipping Warnings
+    private var isHistogramVisible: Bool = false
+    private var isClippingVisible: Bool = false
+    private var isExifVisible: Bool = false
+
+    // Phase 4: Output & Productivity
+    private var isSlideshowActive: Bool = false
+    private var slideshowInterval: Double = 3.0
+    private var slideshowTimer: Timer? = nil
+
+    private var isExporting: Bool = false
+    private var exportProgressText: String? = nil
+
     public init() {
         let screenRect = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         let window = NSWindow(
@@ -67,6 +80,10 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
                 }
 
                 self.allItems = scanResult.items
+
+                // Concurrently load all existing Adobe XMP sidecar metadata in background
+                self.cullingData = await XmpSidecarManager.loadAllSidecars(for: self.allItems)
+
                 self.rebuildFilter(targetIndex: scanResult.initialIndex)
 
                 let screen = window.screen ?? NSScreen.main
@@ -144,8 +161,8 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
         let item = allItems[rawIndex]
         let meta = cullingData[item.id] ?? CullingMetadata()
 
-        let formattedSize = item.fileSize > 0
-            ? ByteCountFormatter.string(fromByteCount: item.fileSize, countStyle: .file)
+        let formattedSize = item.totalStackSize > 0
+            ? ByteCountFormatter.string(fromByteCount: item.totalStackSize, countStyle: .file)
             : nil
 
         do {
@@ -167,15 +184,20 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
             let info = HudInfo(
                 currentIndex: currentFilteredPos,
                 totalCount: filteredIndices.count,
-                filename: item.filename,
+                filename: item.displayName,
                 dimensions: resText,
                 fileSize: formattedSize,
-                isRaw: decoded.isRaw,
+                isRaw: decoded.isRaw || item.rawURL != nil,
+                isStacked: item.isStacked,
                 isDownscaled: decoded.isDownscaled,
                 culling: meta,
                 autoAdvance: autoAdvance,
                 filterTitle: filterBadge,
-                isZoomed: slideView.isZoomed
+                isZoomed: slideView.isZoomed,
+                exif: decoded.exif,
+                isSlideshow: isSlideshowActive,
+                slideshowInterval: slideshowInterval,
+                exportProgressText: exportProgressText
             )
 
             let nativeSize = CGSize(width: decoded.originalWidth, height: decoded.originalHeight)
@@ -186,22 +208,37 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
                 nativeSize: nativeSize,
                 rightNativeSize: rightNativeSize
             )
+
+            // Trigger background async histogram and clipping calculations (Phase 3)
+            if isHistogramVisible {
+                updateHistogramAsync(for: decoded.image)
+            }
+            if isClippingVisible {
+                updateClippingMaskAsync(for: decoded.image, nextImage: splitCgImage)
+            }
         } catch {
             let info = HudInfo(
                 currentIndex: currentFilteredPos,
                 totalCount: filteredIndices.count,
-                filename: item.filename,
+                filename: item.displayName,
+                isRaw: item.rawURL != nil,
+                isStacked: item.isStacked,
                 culling: meta,
                 autoAdvance: autoAdvance,
-                errorMessage: "Decode error: \(error.localizedDescription)"
+                errorMessage: "Decode error: \(error.localizedDescription)",
+                isSlideshow: isSlideshowActive,
+                slideshowInterval: slideshowInterval,
+                exportProgressText: exportProgressText
             )
             slideView.displayImage(nil, info: info)
+            slideView.updateClippingMask(nil, rightMask: nil)
         }
     }
 
     // MARK: - SlideViewDelegate Navigation
 
     public func slideViewRequestNext() {
+        stopSlideshowIfRunning()
         guard !filteredIndices.isEmpty else { return }
         if currentFilteredPos + 1 < filteredIndices.count {
             navigate(toFilteredPos: currentFilteredPos + 1, direction: .forward)
@@ -211,6 +248,7 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
     }
 
     public func slideViewRequestPrevious() {
+        stopSlideshowIfRunning()
         guard !filteredIndices.isEmpty else { return }
         if currentFilteredPos - 1 >= 0 {
             navigate(toFilteredPos: currentFilteredPos - 1, direction: .backward)
@@ -220,22 +258,32 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
     }
 
     public func slideViewRequestFirst() {
+        stopSlideshowIfRunning()
         navigate(toFilteredPos: 0, direction: .jump)
     }
 
     public func slideViewRequestLast() {
+        stopSlideshowIfRunning()
         guard !filteredIndices.isEmpty else { return }
         navigate(toFilteredPos: filteredIndices.count - 1, direction: .jump)
     }
 
     public func slideViewRequestDelete() {
+        stopSlideshowIfRunning()
         guard let rawIndex = currentRawIndex, !isDeleting else { return }
         let itemToDelete = allItems[rawIndex]
         isDeleting = true
 
         Task {
             do {
-                _ = try await TrashManager.moveToTrash(url: itemToDelete.url)
+                // Move all sibling files (RAW + companion JPEG/HEIC) and their sidecars safely to macOS Trash
+                for fileURL in itemToDelete.allURLs {
+                    _ = try await TrashManager.moveToTrash(url: fileURL)
+                    if let sidecarURL = XmpSidecarManager.existingSidecarURL(for: fileURL) {
+                        _ = try? await TrashManager.moveToTrash(url: sidecarURL)
+                    }
+                }
+
                 _ = await self.pipeline.removeItem(at: rawIndex)
                 self.allItems.remove(at: rawIndex)
                 self.cullingData.removeValue(forKey: itemToDelete.id)
@@ -270,7 +318,7 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
 
         let alert = NSAlert()
         alert.messageText = "Purge \(rejectIndices.count) Rejected Files?"
-        alert.informativeText = "The files will be safely moved to macOS Trash."
+        alert.informativeText = "All stacked RAW, JPEG, and XMP files will be safely moved to macOS Trash."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Move to Trash")
         alert.addButton(withTitle: "Cancel")
@@ -290,8 +338,13 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
             var trashedCount = 0
             for idx in indices {
                 let item = allItems[idx]
-                if (try? await TrashManager.moveToTrash(url: item.url)) != nil {
-                    trashedCount += 1
+                for fileURL in item.allURLs {
+                    if (try? await TrashManager.moveToTrash(url: fileURL)) != nil {
+                        trashedCount += 1
+                    }
+                    if let sidecarURL = XmpSidecarManager.existingSidecarURL(for: fileURL) {
+                        _ = try? await TrashManager.moveToTrash(url: sidecarURL)
+                    }
                 }
                 cullingData.removeValue(forKey: item.id)
             }
@@ -317,6 +370,7 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
     // MARK: - 100% 1:1 Pixel Peep Action
 
     public func slideViewRequestZoomToggle(mouseLocation: CGPoint) {
+        stopSlideshowIfRunning()
         if slideView.isZoomed {
             slideView.setZoom(false)
         } else {
@@ -359,36 +413,115 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
         }
     }
 
+    // MARK: - Phase 3: Histogram & Exposure Clipping Controls
+
+    public func slideViewToggleHistogram() {
+        isHistogramVisible.toggle()
+        slideView.setHistogramVisible(isHistogramVisible)
+        let msg = isHistogramVisible ? "RGB Histogram: ON [H]" : "RGB Histogram: OFF [H]"
+        slideView.hudView.showMessage(msg)
+
+        if isHistogramVisible, let rawIndex = currentRawIndex {
+            Task {
+                if let decoded = try? await pipeline.getImage(at: rawIndex) {
+                    updateHistogramAsync(for: decoded.image)
+                }
+            }
+        }
+    }
+
+    public func slideViewToggleExif() {
+        isExifVisible.toggle()
+        slideView.setExifVisible(isExifVisible)
+        let msg = isExifVisible ? "EXIF Info: ON [I]" : "EXIF Info: OFF [I]"
+        slideView.hudView.showMessage(msg)
+    }
+
+    public func slideViewToggleClipping() {
+        isClippingVisible.toggle()
+        slideView.setClippingActive(isClippingVisible)
+        let msg = isClippingVisible ? "Clipping Warnings: ON [O]" : "Clipping Warnings: OFF [O]"
+        slideView.hudView.showMessage(msg)
+
+        if isClippingVisible, let rawIndex = currentRawIndex {
+            Task {
+                if let decoded = try? await pipeline.getImage(at: rawIndex) {
+                    var nextImg: CGImage? = nil
+                    if slideView.isSplitMode && currentFilteredPos + 1 < filteredIndices.count {
+                        let nextRaw = filteredIndices[currentFilteredPos + 1]
+                        nextImg = (try? await pipeline.getImage(at: nextRaw))?.image
+                    }
+                    updateClippingMaskAsync(for: decoded.image, nextImage: nextImg)
+                }
+            }
+        } else {
+            slideView.updateClippingMask(nil, rightMask: nil)
+        }
+    }
+
+    private func updateHistogramAsync(for cgImage: CGImage) {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let data = HistogramEngine.compute(for: cgImage)
+            Task { @MainActor [weak self] in
+                self?.slideView.updateHistogram(data)
+            }
+        }
+    }
+
+    private func updateClippingMaskAsync(for cgImage: CGImage, nextImage: CGImage? = nil) {
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let mask = ClippingEngine.generateClippingMask(for: cgImage)
+            let rightMask: CGImage? = (nextImage != nil) ? ClippingEngine.generateClippingMask(for: nextImage!) : nil
+            Task { @MainActor [weak self] in
+                self?.slideView.updateClippingMask(mask, rightMask: rightMask)
+            }
+        }
+    }
+
     // MARK: - Culling Actions
 
     public func slideViewSetRating(_ rating: Int) {
         guard let rawIndex = currentRawIndex else { return }
         let item = allItems[rawIndex]
         var meta = cullingData[item.id] ?? CullingMetadata()
-        meta.rating = rating
+        meta.rating = (meta.rating == rating) ? 0 : rating
         cullingData[item.id] = meta
 
         applyCullingUpdate()
+        saveMetadataAsync(meta: meta, for: item)
     }
 
     public func slideViewSetPick(_ pick: PickStatus) {
         guard let rawIndex = currentRawIndex else { return }
         let item = allItems[rawIndex]
         var meta = cullingData[item.id] ?? CullingMetadata()
-        meta.pick = pick
+        meta.pick = (meta.pick == pick) ? .unflagged : pick
         cullingData[item.id] = meta
 
         applyCullingUpdate()
+        saveMetadataAsync(meta: meta, for: item)
     }
 
     public func slideViewSetColor(_ color: ColorLabel) {
         guard let rawIndex = currentRawIndex else { return }
         let item = allItems[rawIndex]
         var meta = cullingData[item.id] ?? CullingMetadata()
-        meta.color = color
+        meta.color = (meta.color == color) ? .none : color
         cullingData[item.id] = meta
 
         applyCullingUpdate()
+        saveMetadataAsync(meta: meta, for: item)
+    }
+
+    private func saveMetadataAsync(meta: CullingMetadata, for item: SlideItem) {
+        Task.detached(priority: .utility) {
+            do {
+                let targetURL = item.rawURL ?? item.url
+                try XmpSidecarManager.save(metadata: meta, for: targetURL)
+            } catch {
+                NSLog("Glance: Failed to save XMP sidecar for \(item.filename): \(error)")
+            }
+        }
     }
 
     private func applyCullingUpdate() {
@@ -455,6 +588,7 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
     }
 
     public func slideViewClose() {
+        stopSlideshowTimer()
         if window?.styleMask.contains(.fullScreen) == true {
             window?.toggleFullScreen(nil)
         } else {
@@ -464,6 +598,148 @@ public final class FullScreenWindowController: NSWindowController, SlideViewDele
 
     public func slideViewDidDrop(url: URL) {
         open(targetURL: url, startFullScreen: false)
+    }
+
+    // MARK: - Phase 4: Output & Workflow Productivity
+
+    public func slideViewStopSlideshow() {
+        stopSlideshowIfRunning()
+    }
+
+    private func stopSlideshowIfRunning() {
+        guard isSlideshowActive else { return }
+        isSlideshowActive = false
+        stopSlideshowTimer()
+        slideView.hudView.showMessage("Slideshow Stopped")
+        Task {
+            await loadAndDisplayCurrent()
+        }
+    }
+
+    public func slideViewToggleSlideshow() {
+        isSlideshowActive.toggle()
+        if isSlideshowActive {
+            startSlideshowTimer()
+            slideView.hudView.showMessage("Slideshow: ON (\(Int(slideshowInterval))s) [Return]")
+        } else {
+            stopSlideshowTimer()
+            slideView.hudView.showMessage("Slideshow: OFF [Return]")
+        }
+        Task {
+            await loadAndDisplayCurrent()
+        }
+    }
+
+    private func startSlideshowTimer() {
+        slideshowTimer?.invalidate()
+        slideshowTimer = Timer.scheduledTimer(withTimeInterval: slideshowInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.advanceSlideshow()
+            }
+        }
+    }
+
+    private func advanceSlideshow() {
+        guard isSlideshowActive, !filteredIndices.isEmpty else { return }
+        if currentFilteredPos + 1 < filteredIndices.count {
+            navigate(toFilteredPos: currentFilteredPos + 1, direction: .forward)
+        } else {
+            navigate(toFilteredPos: 0, direction: .forward)
+        }
+    }
+
+    private func stopSlideshowTimer() {
+        slideshowTimer?.invalidate()
+        slideshowTimer = nil
+    }
+
+    public func slideViewRotate(direction: RotationDirection) {
+        stopSlideshowIfRunning()
+        guard let rawIndex = currentRawIndex, rawIndex >= 0 && rawIndex < allItems.count else { return }
+        let item = allItems[rawIndex]
+
+        slideView.hudView.showMessage("Rotating...")
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                _ = try LosslessRotationEngine.rotate(item: item, direction: direction)
+                await self?.pipeline.invalidateCache(at: rawIndex)
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    let dirTitle = (direction == .clockwise) ? "Clockwise 90° [R]" : "Counter-Clockwise 90° [L]"
+                    self.slideView.hudView.showMessage("Rotated \(dirTitle)")
+                    await self.loadAndDisplayCurrent()
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    self?.slideView.hudView.showMessage("Rotation failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    public func slideViewRequestExport() {
+        stopSlideshowIfRunning()
+        guard !allItems.isEmpty, !isExporting else { return }
+
+        // Resolve target items
+        let itemsToExport: [SlideItem]
+        let reason: String
+        if currentFilter != .all {
+            itemsToExport = filteredIndices.map { allItems[$0] }
+            reason = "\(currentFilter.title) (\(itemsToExport.count) shots)"
+        } else {
+            let picks = allItems.filter { item in
+                let meta = cullingData[item.id] ?? CullingMetadata()
+                return meta.pick == .pick || meta.rating >= 4
+            }
+            if !picks.isEmpty {
+                itemsToExport = picks
+                reason = "Picks & 4★+ (\(itemsToExport.count) shots)"
+            } else if let raw = currentRawIndex, raw < allItems.count {
+                // If no picks exist, export the currently viewed photo
+                itemsToExport = [allItems[raw]]
+                reason = "Current Shot"
+            } else {
+                itemsToExport = allItems
+                reason = "All Files (\(itemsToExport.count) shots)"
+            }
+        }
+
+        guard !itemsToExport.isEmpty else {
+            slideView.hudView.showMessage("No photos to export.")
+            return
+        }
+
+        guard let firstItem = allItems.first else { return }
+        let parentDir = firstItem.url.deletingLastPathComponent()
+        let destination = parentDir.appendingPathComponent("Picks")
+
+        isExporting = true
+        slideView.hudView.showMessage("Exporting \(reason)...")
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let summary = try await ExportManager.shared.export(
+                    items: itemsToExport,
+                    destinationDirectory: destination
+                ) { [weak self] progress in
+                    Task { @MainActor in
+                        self?.slideView.hudView.showMessage("Exporting \(progress.current) / \(progress.total)...")
+                    }
+                }
+
+                self.isExporting = false
+                let finishMsg = "Exported \(summary.exportedCount) shots (\(summary.totalFilesWritten) files) to ./Picks"
+                self.slideView.hudView.showMessage(finishMsg)
+                NSSound(named: "Glass")?.play()
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
+            } catch {
+                self.isExporting = false
+                self.slideView.hudView.showMessage("Export failed: \(error.localizedDescription)")
+            }
+        }
+        return
     }
 
     // MARK: - Window Delegate

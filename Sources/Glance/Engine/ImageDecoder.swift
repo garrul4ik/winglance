@@ -9,6 +9,7 @@ public struct DecodedImage: @unchecked Sendable {
     public let originalHeight: Int
     public let isDownscaled: Bool
     public let isRaw: Bool
+    public let exif: ExifMetadata?
 
     public var aspectRatio: CGFloat {
         guard originalHeight > 0 else { return 1.0 }
@@ -20,13 +21,15 @@ public struct DecodedImage: @unchecked Sendable {
         originalWidth: Int,
         originalHeight: Int,
         isDownscaled: Bool,
-        isRaw: Bool
+        isRaw: Bool,
+        exif: ExifMetadata? = nil
     ) {
         self.image = image
         self.originalWidth = originalWidth
         self.originalHeight = originalHeight
         self.isDownscaled = isDownscaled
         self.isRaw = isRaw
+        self.exif = exif
     }
 }
 
@@ -48,14 +51,14 @@ public final class ImageDecoder: Sendable {
         at url: URL,
         maxBoundingPixelSize: Int? = nil
     ) throws -> DecodedImage {
-        let isRawFile = SupportedFormats.isRaw(url: url)
+        // Fast extension-based RAW check
+        let ext = url.pathExtension.lowercased()
+        let isRawFile = SupportedFormats.rawExtensions.contains(ext)
 
-        // 1. Strip macOS quarantine attribute if present so Gatekeeper/XProtect doesn't intercept
-        _ = removexattr(url.path, "com.apple.quarantine", 0)
-
-        // Read options
+        // 1. Configure zero-copy & cache options for ImageIO
         let sourceOptions: [CFString: Any] = [
-            kCGImageSourceShouldCache: false
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldAllowFloat: true
         ]
 
         // 2. Load via memory-mapping (mmap zero-copy, completely bypasses Gatekeeper/syspolicyd URL checks)
@@ -80,6 +83,7 @@ public final class ImageDecoder: Sendable {
         // 3. Query image properties (dimensions, EXIF) without decoding full bitmap
         var originalWidth = 0
         var originalHeight = 0
+        var parsedExif: ExifMetadata? = nil
         if let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] {
             let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
             let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
@@ -93,6 +97,8 @@ public final class ImageDecoder: Sendable {
                 originalWidth = width
                 originalHeight = height
             }
+
+            parsedExif = ExifMetadata(from: properties)
         }
 
         let maxOriginalDim = max(originalWidth, originalHeight)
@@ -129,7 +135,8 @@ public final class ImageDecoder: Sendable {
                     originalWidth: originalWidth > 0 ? originalWidth : directImage.width,
                     originalHeight: originalHeight > 0 ? originalHeight : directImage.height,
                     isDownscaled: false,
-                    isRaw: isRawFile
+                    isRaw: isRawFile,
+                    exif: parsedExif
                 )
             }
             throw NSError(domain: "ImageDecoder", code: 422, userInfo: [
@@ -142,7 +149,8 @@ public final class ImageDecoder: Sendable {
             originalWidth: originalWidth > 0 ? originalWidth : cgImage.width,
             originalHeight: originalHeight > 0 ? originalHeight : cgImage.height,
             isDownscaled: shouldDownscale,
-            isRaw: isRawFile
+            isRaw: isRawFile,
+            exif: parsedExif
         )
     }
 }

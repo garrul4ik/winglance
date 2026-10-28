@@ -28,11 +28,18 @@ public struct CullingMetadata: Sendable, Codable, Equatable {
     public var rating: Int // 0..5 stars
     public var pick: PickStatus
     public var color: ColorLabel
+    public var orientation: Int? // EXIF Orientation 1..8
 
-    public init(rating: Int = 0, pick: PickStatus = .unflagged, color: ColorLabel = .none) {
+    public init(
+        rating: Int = 0,
+        pick: PickStatus = .unflagged,
+        color: ColorLabel = .none,
+        orientation: Int? = nil
+    ) {
         self.rating = max(0, min(5, rating))
         self.pick = pick
         self.color = color
+        self.orientation = orientation
     }
 }
 

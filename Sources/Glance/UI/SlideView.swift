@@ -24,19 +24,34 @@ public protocol SlideViewDelegate: AnyObject {
 
     // 100% Zoom Action
     func slideViewRequestZoomToggle(mouseLocation: CGPoint)
+
+    // Phase 3: Histogram & Exposure Clipping
+    func slideViewToggleHistogram()
+    func slideViewToggleClipping()
+    func slideViewToggleExif()
+
+    // Phase 4: Output & Workflow Productivity
+    func slideViewRequestExport()
+    func slideViewRotate(direction: RotationDirection)
+    func slideViewToggleSlideshow()
+    func slideViewStopSlideshow()
 }
 
 /// Ultra-responsive, zero-latency layer-backed NSView.
 /// Supports single image full-screen display, 2-up split burst compare mode,
-/// instant 100% 1:1 pixel peeping with smooth pan/drag, and quick help overlay.
+/// instant 100% 1:1 pixel peeping with smooth pan/drag, live RGB histogram,
+/// and camera-style exposure clipping warnings ("blinkies").
 @MainActor
 public final class SlideView: NSView {
     public weak var delegate: SlideViewDelegate?
 
     private let leftContainerLayer = CALayer()
     private let leftImageLayer = CALayer()
+    private let leftClippingLayer = CALayer()
+
     private let rightContainerLayer = CALayer()
     private let rightImageLayer = CALayer()
+    private let rightClippingLayer = CALayer()
 
     // Aliases for compatibility
     private var containerLayer: CALayer { leftContainerLayer }
@@ -44,10 +59,13 @@ public final class SlideView: NSView {
     private var splitLayer: CALayer { rightImageLayer }
 
     public let hudView = GlassHudView()
+    public let histogramHud = HistogramHudView()
+    public let exifHud = ExifHudView()
     public let quickHelpView = QuickHelpView()
 
     public private(set) var isSplitMode: Bool = false
     public private(set) var isZoomed: Bool = false
+    public private(set) var isClippingActive: Bool = false
 
     // Zoom & Pan state
     private var zoomPanOffset: CGPoint = .zero
@@ -94,6 +112,18 @@ public final class SlideView: NSView {
         ]
         leftContainerLayer.addSublayer(leftImageLayer)
 
+        // Left Exposure Clipping Overlay Layer ("Blinkies")
+        leftClippingLayer.backgroundColor = NSColor.clear.cgColor
+        leftClippingLayer.actions = [
+            "contents": NSNull(),
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "transform": NSNull(),
+            "opacity": NSNull()
+        ]
+        leftClippingLayer.isHidden = true
+        leftImageLayer.addSublayer(leftClippingLayer)
+
         // Right Container Layer (for 2-Up Split Compare)
         rightContainerLayer.backgroundColor = NSColor.black.cgColor
         rightContainerLayer.masksToBounds = true
@@ -110,11 +140,32 @@ public final class SlideView: NSView {
             "transform": NSNull()
         ]
         rightContainerLayer.addSublayer(rightImageLayer)
+
+        // Right Exposure Clipping Overlay Layer
+        rightClippingLayer.backgroundColor = NSColor.clear.cgColor
+        rightClippingLayer.actions = [
+            "contents": NSNull(),
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "transform": NSNull(),
+            "opacity": NSNull()
+        ]
+        rightClippingLayer.isHidden = true
+        rightImageLayer.addSublayer(rightClippingLayer)
     }
 
     private func setupHud() {
         hudView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(hudView)
+
+        histogramHud.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(histogramHud)
+        histogramHud.onToggleClipping = { [weak self] in
+            self?.delegate?.slideViewToggleClipping()
+        }
+
+        exifHud.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(exifHud)
 
         quickHelpView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(quickHelpView)
@@ -125,6 +176,14 @@ public final class SlideView: NSView {
             hudView.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 32),
             hudView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -32),
             hudView.heightAnchor.constraint(greaterThanOrEqualToConstant: 38),
+
+            histogramHud.topAnchor.constraint(equalTo: topAnchor, constant: 28),
+            histogramHud.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28),
+            histogramHud.widthAnchor.constraint(equalToConstant: 284),
+
+            exifHud.topAnchor.constraint(equalTo: topAnchor, constant: 28),
+            exifHud.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
+            exifHud.widthAnchor.constraint(equalToConstant: 284),
 
             quickHelpView.centerXAnchor.constraint(equalTo: centerXAnchor),
             quickHelpView.centerYAnchor.constraint(equalTo: centerYAnchor)
@@ -239,20 +298,22 @@ public final class SlideView: NSView {
                 )
             } else {
                 leftImageLayer.contentsGravity = .resizeAspect
-                leftImageLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+                leftImageLayer.bounds = bounds
                 leftImageLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
                 zoomPanOffset = .zero
             }
         }
+
+        leftClippingLayer.frame = leftImageLayer.bounds
+        rightClippingLayer.frame = rightImageLayer.bounds
+
         CATransaction.commit()
     }
-
-    // MARK: - Image Presentation
 
     public func displayImage(
         _ cgImage: CGImage?,
         nextImage: CGImage? = nil,
-        info: HudInfo?,
+        info: HudInfo? = nil,
         nativeSize: CGSize? = nil,
         rightNativeSize: CGSize? = nil
     ) {
@@ -285,6 +346,7 @@ public final class SlideView: NSView {
 
         if let info = info {
             hudView.update(with: info)
+            exifHud.update(with: info.exif, dimensions: info.dimensions, fileSize: info.fileSize)
         }
     }
 
@@ -298,6 +360,8 @@ public final class SlideView: NSView {
         CATransaction.setDisableActions(true)
         imageLayer.contents = nil
         splitLayer.contents = nil
+        leftClippingLayer.contents = nil
+        rightClippingLayer.contents = nil
         CATransaction.commit()
 
         hudView.showMessage(message)
@@ -309,6 +373,61 @@ public final class SlideView: NSView {
 
     public func toggleHelp() {
         quickHelpView.toggle()
+    }
+
+    // MARK: - Phase 3: Histogram & Clipping Warnings ("Blinkies")
+
+    public func updateHistogram(_ data: HistogramData) {
+        histogramHud.update(with: data)
+    }
+
+    public func setHistogramVisible(_ visible: Bool) {
+        histogramHud.setVisible(visible)
+    }
+
+    public func setExifVisible(_ visible: Bool) {
+        exifHud.setVisible(visible)
+    }
+
+    public func setClippingActive(_ active: Bool) {
+        isClippingActive = active
+        leftClippingLayer.isHidden = !active
+        rightClippingLayer.isHidden = !active
+
+        if active {
+            startBlinkyAnimation()
+        } else {
+            stopBlinkyAnimation()
+        }
+    }
+
+    public func updateClippingMask(_ mask: CGImage?, rightMask: CGImage? = nil) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        leftClippingLayer.contents = mask
+        rightClippingLayer.contents = rightMask
+        CATransaction.commit()
+    }
+
+    private func startBlinkyAnimation() {
+        leftClippingLayer.removeAnimation(forKey: "blinkyPulse")
+        rightClippingLayer.removeAnimation(forKey: "blinkyPulse")
+
+        let anim = CABasicAnimation(keyPath: "opacity")
+        anim.fromValue = 0.20
+        anim.toValue = 0.95
+        anim.duration = 0.50
+        anim.autoreverses = true
+        anim.repeatCount = .infinity
+        anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+        leftClippingLayer.add(anim, forKey: "blinkyPulse")
+        rightClippingLayer.add(anim, forKey: "blinkyPulse")
+    }
+
+    private func stopBlinkyAnimation() {
+        leftClippingLayer.removeAnimation(forKey: "blinkyPulse")
+        rightClippingLayer.removeAnimation(forKey: "blinkyPulse")
     }
 
     // MARK: - 100% Zoom & Pan Mechanics
@@ -385,6 +504,7 @@ public final class SlideView: NSView {
     }
 
     public override func mouseDown(with event: NSEvent) {
+        delegate?.slideViewStopSlideshow()
         let mousePt = convert(event.locationInWindow, from: nil)
         if !isZoomed {
             // Click to zoom in
@@ -445,11 +565,47 @@ public final class SlideView: NSView {
     public override func keyDown(with event: NSEvent) {
         resetCursorTimer()
 
-        if quickHelpView.alphaValue > 0.0 && event.keyCode != 44 {
+        let chars = event.charactersIgnoringModifiers ?? ""
+        let lower = chars.lowercased()
+        let isShift = event.modifierFlags.contains(.shift)
+
+        if quickHelpView.alphaValue > 0.0 && !(chars == "?" || (event.keyCode == 44 && isShift)) {
             quickHelpView.dismiss()
         }
 
-        let isShift = event.modifierFlags.contains(.shift)
+        // --- Layout-Independent Primary Hotkeys ---
+        // Rotate Right 90°: 'R' or ']'
+        if lower == "r" || chars == "]" || event.keyCode == 30 || event.keyCode == 15 {
+            delegate?.slideViewStopSlideshow()
+            delegate?.slideViewRotate(direction: .clockwise)
+            return
+        }
+
+        // Rotate Left 90°: 'L' or '['
+        if lower == "l" || chars == "[" || event.keyCode == 33 || event.keyCode == 37 {
+            delegate?.slideViewStopSlideshow()
+            delegate?.slideViewRotate(direction: .counterClockwise)
+            return
+        }
+
+        // Quick Export: 'E'
+        if lower == "e" || event.keyCode == 14 {
+            delegate?.slideViewStopSlideshow()
+            delegate?.slideViewRequestExport()
+            return
+        }
+
+        // Slideshow Toggle: Return / Enter
+        if lower == "\r" || event.keyCode == 36 || event.keyCode == 76 {
+            delegate?.slideViewToggleSlideshow()
+            return
+        }
+
+        // Quick Help Cheatsheet: '?' only (Shift + /)
+        if chars == "?" || (event.keyCode == 44 && isShift) {
+            toggleHelp()
+            return
+        }
 
         switch event.keyCode {
         // Space, Right Arrow, Down Arrow, Page Down, 'N'
@@ -500,8 +656,14 @@ public final class SlideView: NSView {
             delegate?.slideViewToggleSplitCompare()
         case 42: // '\'
             delegate?.slideViewCycleFilter()
-        case 44, 4: // '?' or 'H'
-            toggleHelp()
+
+        // --- PHASE 3: HISTOGRAM & CLIPPING HOTKEYS ---
+        case 4: // 'H' -> Toggle Live RGB Histogram
+            delegate?.slideViewToggleHistogram()
+        case 31: // 'O' -> Toggle Exposure Clipping Warnings ("Blinkies")
+            delegate?.slideViewToggleClipping()
+
+        // Phase 4 hotkeys handled above via layout-independent matcher
 
         // Numbers 0..5 (Stars) & 6..9 (Colors)
         case 29:
@@ -529,8 +691,9 @@ public final class SlideView: NSView {
         case 3: // 'F'
             delegate?.slideViewToggleFullScreen()
         case 34: // 'I'
-            toggleHud()
+            delegate?.slideViewToggleExif()
         case 53, 12: // Esc or 'Q'
+            delegate?.slideViewStopSlideshow()
             if isZoomed {
                 setZoom(false)
             } else if quickHelpView.alphaValue > 0.0 {
@@ -566,24 +729,5 @@ public final class SlideView: NSView {
 
     deinit {
         cursorTimer?.invalidate()
-    }
-
-    // MARK: - Drag and Drop
-
-    public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let pasteboard = sender.draggingPasteboard
-        if pasteboard.canReadObject(forClasses: [NSURL.self], options: nil) {
-            return .copy
-        }
-        return []
-    }
-
-    public override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-              let firstURL = urls.first else {
-            return false
-        }
-        delegate?.slideViewDidDrop(url: firstURL)
-        return true
     }
 }
