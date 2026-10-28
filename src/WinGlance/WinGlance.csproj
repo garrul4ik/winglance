@@ -9,6 +9,16 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>icon.ico</ApplicationIcon>
 
+    <!-- Versioning & Metadata -->
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Product>WinGlance</Product>
+    <Company>WinGlance Contributors</Company>
+    <Authors>mortalezz, garrul4ik</Authors>
+    <Description>Ultra-fast, zero-latency RAW photo viewer &amp; pro culling tool for Windows 11. Standalone Windows port of Glance for macOS by mortalezz (https://github.com/mortalezz/glance).</Description>
+    <Copyright>Copyright © 2026 mortalezz (Glance), WinGlance Contributors</Copyright>
+
     <!-- Single-file bundle configuration -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>

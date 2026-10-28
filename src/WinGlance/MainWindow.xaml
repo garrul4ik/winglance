@@ -246,6 +246,11 @@
                             <TextBlock Text="F : Toggle Fullscreen" Foreground="#E0E0E0" FontSize="12" Margin="0,2"/>
                         </StackPanel>
                     </UniformGrid>
+
+                    <Border BorderBrush="#1FFFFFFF" BorderThickness="0,1,0,0" Margin="0,14,0,0" Padding="0,10,0,0">
+                        <TextBlock Text="WinGlance 1.0.0 · Standalone Windows 11 port of Glance (macOS) by @mortalezz (github.com/mortalezz/glance)"
+                                   Foreground="#777777" FontSize="11" HorizontalAlignment="Center"/>
+                    </Border>
                 </StackPanel>
             </Border>
         </Grid>
