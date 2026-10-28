@@ -1,8 +1,8 @@
 import AppKit
 
 /// Clean, monochromatic Apple Pro frosted-glass shortcuts sheet.
-/// Uses a two-column key-value grid with aligned monospaced keycaps
-/// and clean neutral typography.
+/// Uses explicit column width constraints and generous right margin
+/// so descriptions are never clipped by the rounded corner or frame edge.
 @MainActor
 public final class QuickHelpView: NSView {
     private let visualEffectView = NSVisualEffectView()
@@ -29,7 +29,7 @@ public final class QuickHelpView: NSView {
         alphaValue = 0.0
 
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.60)
         shadow.shadowOffset = NSSize(width: 0, height: -8)
         shadow.shadowBlurRadius = 24
         self.shadow = shadow
@@ -41,10 +41,10 @@ public final class QuickHelpView: NSView {
         visualEffectView.translatesAutoresizingMaskIntoConstraints = false
 
         if let layer = visualEffectView.layer {
-            layer.cornerRadius = 16
+            layer.cornerRadius = 18
             layer.cornerCurve = .continuous
             layer.masksToBounds = true
-            layer.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+            layer.borderColor = NSColor.white.withAlphaComponent(0.20).cgColor
             layer.borderWidth = 0.5
         }
 
@@ -63,27 +63,29 @@ public final class QuickHelpView: NSView {
         root.alignment = .leading
         root.spacing = 14
         root.translatesAutoresizingMaskIntoConstraints = false
-        root.edgeInsets = NSEdgeInsets(top: 18, left: 22, bottom: 18, right: 22)
+        // Generous insets: 28pt padding so text never touches the curved borders
+        root.edgeInsets = NSEdgeInsets(top: 22, left: 28, bottom: 22, right: 32)
         visualEffectView.addSubview(root)
 
-        // Monochromatic Header
+        // Header Title
         let titleLabel = NSTextField(labelWithString: "SHORTCUTS")
         titleLabel.font = NSFont.systemFont(ofSize: 10, weight: .bold)
-        titleLabel.textColor = NSColor(white: 0.50, alpha: 1.0)
+        titleLabel.textColor = NSColor(white: 0.55, alpha: 1.0)
         root.addArrangedSubview(titleLabel)
 
-        // Clean Two-Column Grid
+        // Two-Column Grid with explicit spacing
         let columns = NSStackView()
         columns.orientation = .horizontal
         columns.alignment = .top
-        columns.spacing = 28
+        columns.spacing = 36
         columns.translatesAutoresizingMaskIntoConstraints = false
 
         // Column 1: Rating & Culling
         let col1 = NSStackView()
         col1.orientation = .vertical
         col1.alignment = .leading
-        col1.spacing = 7
+        col1.spacing = 8
+        col1.translatesAutoresizingMaskIntoConstraints = false
         col1.addArrangedSubview(makeRow(key: "P", desc: "Pick"))
         col1.addArrangedSubview(makeRow(key: "X", desc: "Reject"))
         col1.addArrangedSubview(makeRow(key: "U", desc: "Unflag"))
@@ -96,7 +98,8 @@ public final class QuickHelpView: NSView {
         let col2 = NSStackView()
         col2.orientation = .vertical
         col2.alignment = .leading
-        col2.spacing = 7
+        col2.spacing = 8
+        col2.translatesAutoresizingMaskIntoConstraints = false
         col2.addArrangedSubview(makeRow(key: "S", desc: "Split compare"))
         col2.addArrangedSubview(makeRow(key: "\\", desc: "Cycle filter"))
         col2.addArrangedSubview(makeRow(key: "⇧ ⌫", desc: "Purge rejects"))
@@ -111,7 +114,10 @@ public final class QuickHelpView: NSView {
             root.topAnchor.constraint(equalTo: visualEffectView.topAnchor),
             root.bottomAnchor.constraint(equalTo: visualEffectView.bottomAnchor),
             root.leadingAnchor.constraint(equalTo: visualEffectView.leadingAnchor),
-            root.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor)
+            root.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor),
+
+            // Ensure column 2 has enough guaranteed width so text isn't cramped
+            col2.widthAnchor.constraint(greaterThanOrEqualToConstant: 165)
         ])
     }
 
@@ -122,10 +128,10 @@ public final class QuickHelpView: NSView {
         row.spacing = 10
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        // Subtle dark keycap with pure white lettering
+        // Keycap badge
         let keycap = NSView()
         keycap.wantsLayer = true
-        keycap.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.10).cgColor
+        keycap.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.12).cgColor
         keycap.layer?.cornerRadius = 5
         keycap.layer?.cornerCurve = .continuous
         keycap.translatesAutoresizingMaskIntoConstraints = false
@@ -138,7 +144,7 @@ public final class QuickHelpView: NSView {
 
         keycap.addSubview(keyLabel)
         NSLayoutConstraint.activate([
-            keycap.widthAnchor.constraint(equalToConstant: 42),
+            keycap.widthAnchor.constraint(equalToConstant: 44),
             keycap.heightAnchor.constraint(equalToConstant: 22),
             keyLabel.centerXAnchor.constraint(equalTo: keycap.centerXAnchor),
             keyLabel.centerYAnchor.constraint(equalTo: keycap.centerYAnchor)
@@ -147,7 +153,11 @@ public final class QuickHelpView: NSView {
 
         let descLabel = NSTextField(labelWithString: desc)
         descLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
-        descLabel.textColor = NSColor(white: 0.80, alpha: 1.0)
+        descLabel.textColor = NSColor(white: 0.85, alpha: 1.0)
+        descLabel.lineBreakMode = .byClipping
+        // Prevent label from being compressed or truncated
+        descLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        descLabel.setContentHuggingPriority(.required, for: .horizontal)
         row.addArrangedSubview(descLabel)
 
         return row
@@ -157,12 +167,12 @@ public final class QuickHelpView: NSView {
         super.layout()
         guard bounds.width > 0 && bounds.height > 0 else { return }
         let maskImage = NSImage(size: bounds.size, flipped: false) { rect in
-            let path = NSBezierPath(roundedRect: rect, xRadius: 16, yRadius: 16)
+            let path = NSBezierPath(roundedRect: rect, xRadius: 18, yRadius: 18)
             NSColor.black.setFill()
             path.fill()
             return true
         }
-        maskImage.capInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        maskImage.capInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         maskImage.resizingMode = .stretch
         visualEffectView.maskImage = maskImage
     }
