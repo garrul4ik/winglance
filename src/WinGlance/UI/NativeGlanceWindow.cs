@@ -432,6 +432,12 @@ public sealed class NativeGlanceWindow : IDisposable
         {
             ResetZoomState();
             ShowToast("Fit to Screen");
+            if (_primaryDecoded.IsFullSensorRaw && _pipeline.TryGetCachedScreenImage(_hud.CurrentIndex, out var screenImg))
+            {
+                _primaryDecoded = screenImg;
+                _renderer.SetPrimaryImage(screenImg);
+                UpdateDerivedOverlays(screenImg);
+            }
             RequestRedraw();
             return;
         }
@@ -515,6 +521,12 @@ public sealed class NativeGlanceWindow : IDisposable
         if (nextScale <= fitPhysScale * 1.02f && wheelDelta < 0)
         {
             ResetZoomState();
+            if (_primaryDecoded.IsFullSensorRaw && _pipeline.TryGetCachedScreenImage(_hud.CurrentIndex, out var screenImg))
+            {
+                _primaryDecoded = screenImg;
+                _renderer.SetPrimaryImage(screenImg);
+                UpdateDerivedOverlays(screenImg);
+            }
             RequestRedraw();
             return;
         }

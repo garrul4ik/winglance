@@ -447,6 +447,44 @@ public class WinGlanceTests
         Assert.InRange(stops[0].Point.Y, 0f, 1f);
     }
 
+    [Fact]
+    public void TestRealDngAndCr3FileDecodingAndVision()
+    {
+        string dngPath = @"C:\_dev\glance\IMGP6306.DNG";
+        if (File.Exists(dngPath))
+        {
+            var dngPreviewBytes = FastImageDecoder.ExtractEmbeddedRawPreviewBytes(dngPath);
+            Assert.NotNull(dngPreviewBytes);
+            Assert.True(dngPreviewBytes.Length > 1_000_000, $"DNG preview should be > 1MB, was {dngPreviewBytes.Length}");
+
+            var dngPreview = FastImageDecoder.Decode(dngPath, maxBoundingPixelSize: 2560);
+            Assert.NotNull(dngPreview);
+            Assert.Equal(ImagePixelFormat.Bgra32, dngPreview.PixelFormat);
+            Assert.True(dngPreview.Width > 1000 && dngPreview.Height > 1000);
+
+            var dngStops = EyeFocusDetector.BuildJumpSequence(dngPreview);
+            Assert.NotEmpty(dngStops);
+        }
+
+        string cr3Path = @"C:\_dev\glance\IMG_7353.CR3";
+        if (File.Exists(cr3Path))
+        {
+            var cr3PreviewBytes = FastImageDecoder.ExtractEmbeddedRawPreviewBytes(cr3Path);
+            Assert.NotNull(cr3PreviewBytes);
+            Assert.True(cr3PreviewBytes.Length > 100_000, $"CR3 preview should be > 100KB, was {cr3PreviewBytes.Length}");
+
+            var cr3Preview = FastImageDecoder.Decode(cr3Path, maxBoundingPixelSize: 2560);
+            Assert.NotNull(cr3Preview);
+            Assert.Equal(ImagePixelFormat.Bgra32, cr3Preview.PixelFormat);
+            Assert.True(cr3Preview.Width > 800 && cr3Preview.Height > 800);
+
+            var cr3Stops = EyeFocusDetector.BuildJumpSequence(cr3Preview);
+            Assert.NotEmpty(cr3Stops);
+            // Verify eye detected in upper portion of photo
+            Assert.True(cr3Stops[0].Point.Y < 0.5f, $"Eye Y should be in upper half, was {cr3Stops[0].Point.Y}");
+        }
+    }
+
     private static byte[] CreateTestJpegBytes(int width, int height)
     {
         using var wic = new IWICImagingFactory2();

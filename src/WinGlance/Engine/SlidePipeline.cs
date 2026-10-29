@@ -59,6 +59,11 @@ public sealed class SlidePipeline
         }
     }
 
+    public bool TryGetCachedScreenImage(int index, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out DecodedImage? image)
+    {
+        return _cache.TryGetValue(index, out image);
+    }
+
     public async Task<DecodedImage> GetImageAsync(int index, CancellationToken ct = default)
     {
         if (index < 0 || index >= _items.Count)

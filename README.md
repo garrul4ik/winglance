@@ -2,7 +2,7 @@
 
 <img src="assets/icon.png" alt="WinGlance Icon" width="160" height="160" />
 
-# 📸 WinGlance 2.0 for Windows 11 ⚡
+# 📸 WinGlance 1.2 for Windows 11 ⚡
 
 ### The ultra-fast, native DirectX 11 & Direct2D 1.3 HDR photo viewer & pro culling tool 🚀  
 *Instant full-screen folder browsing, zero-latency traversal, 16-bit RAW demosaicing, and on-device DirectML AI Vision.*
@@ -24,7 +24,7 @@
 > ### 🕊️ Standalone Windows Port of Glance for macOS
 > **WinGlance** is an open-source Windows 11 standalone port of [**Glance**](https://github.com/mortalezz/glance), originally designed and created for macOS by [**@mortalezz**](https://github.com/mortalezz).
 >
-> WinGlance 2.0 completely re-architects the graphics and vision pipeline to deliver an Apple Metal / Vision-grade monolithic experience natively on Windows 11:
+> WinGlance 1.2 re-architects the graphics and vision pipeline to deliver an Apple Metal / Vision-grade monolithic experience natively on Windows 11:
 > 1. 🖼️ **Native Direct3D 11.1 & Direct2D 1.3 HDR Pipeline**: Flip-Model swapchain running in 16-bit floating-point linear scRGB (`R16G16B16A16_FLOAT`) for Wide Color Gamut (Display P3, Adobe RGB, ProPhoto RGB) and HDR monitors, falling back cleanly to sRGB.
 > 2. ⚡ **Zero-Copy Memory-Mapped RAW Previews + 16-bit LibRaw Demosaicing**: Bundled monolithic `LibRaw` (1,182 camera models supported, zero Microsoft Store codec dependencies) with instant zero-copy previews for Sony `.ARW`, Canon `.CR2`/`.CR3` (`PRVW`), Nikon `.NEF`, Fujifilm `.RAF`, Panasonic `.RW2`, Olympus `.ORF`, Pentax `.PEF`, and true 16-bit sensor demosaicing on 1:1 zoom.
 > 3. 🫧 **Real Within-Window Frosted-Glass Vibrancy HUDs**: Real-time `CLSID_D2D1GaussianBlur` shaders blur the photo beneath rounded squircle HUD cards and modals.
@@ -109,7 +109,7 @@ Press **`?`** or **`F1`** at any time inside WinGlance to toggle the interactive
 
 ### Option 1: Direct Download (Portable Standalone) 📦
 Download the pre-compiled standalone binary from the [**Releases Page**](https://github.com/garrul4ik/winglance/releases/latest):
-1. Download **`WinGlance-v2.0.0-Windows-x64.zip`** (or `WinGlance.exe`).
+1. Download **`WinGlance-v1.2.0-Windows-x64.zip`** (or `WinGlance.exe`).
 2. Run `WinGlance.exe` anywhere — completely portable, single file (9.6 MB), zero installer, zero dependencies.
 3. Drag any image or photo folder onto `WinGlance.exe` or set it as default in Windows Explorer!
 
@@ -131,7 +131,7 @@ dotnet publish src/WinGlance/WinGlance.csproj -c Release -r win-x64 -p:PublishAo
 ## 🤝 Credits & Acknowledgements
 
 - **Original Project & Concept**: [mortalezz/glance](https://github.com/mortalezz/glance) by [**@mortalezz**](https://github.com/mortalezz). All UI design patterns, keyboard shortcuts, and Phoenix Slides revival philosophies originate from Glance for macOS.
-- **Windows Standalone Port (WinGlance 2.0)**: Developed for Windows 11 by [**@garrul4ik**](https://github.com/garrul4ik) with Direct3D 11, Direct2D 1.3 HDR, LibRaw, and DirectML AI Vision.
+- **Windows Standalone Port (WinGlance 1.2)**: Developed for Windows 11 by [**@garrul4ik**](https://github.com/garrul4ik) with Direct3D 11, Direct2D 1.3 HDR, LibRaw, and DirectML AI Vision.
 
 ---
 

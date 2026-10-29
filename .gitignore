@@ -18,3 +18,11 @@ ref/glance-mac/Glance.app/
 *.swp
 *~
 *.zip
+*.CR3
+*.cr3
+*.DNG
+*.dng
+*.ARW
+*.arw
+*.NEF
+*.nef

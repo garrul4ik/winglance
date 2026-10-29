@@ -392,11 +392,15 @@ public static class FastImageDecoder
             var parentExif = ReadExifMetadata(filePath);
             var jpegBytes = ExtractEmbeddedRawPreviewBytes(filePath);
 
-            if (jpegBytes == null || jpegBytes.Length < 256)
+            if (jpegBytes == null || jpegBytes.Length < 50_000)
             {
-                jpegBytes = RawSensorDecoder.TryExtractPreviewBytes(filePath, out var libRawExif, out var bitmapThumb);
-                parentExif ??= libRawExif;
-                if (bitmapThumb != null)
+                var fallbackJpeg = RawSensorDecoder.TryExtractPreviewBytes(filePath, out var libRawExif, out var bitmapThumb);
+                if (fallbackJpeg != null && (jpegBytes == null || fallbackJpeg.Length > jpegBytes.Length))
+                {
+                    jpegBytes = fallbackJpeg;
+                    parentExif ??= libRawExif;
+                }
+                else if (bitmapThumb != null && jpegBytes == null)
                 {
                     return xmpOrientation is >= 2 and <= 8
                         ? TransformRgbaOrBgraSoftware(bitmapThumb, xmpOrientation.Value)
@@ -471,12 +475,22 @@ public static class FastImageDecoder
 
     private static unsafe byte[]? ExtractCr3Preview(byte* ptr, long fileLen)
     {
-        return ScanIsoBmffForPrvw(ptr, 0, fileLen, fileLen, depth: 0);
+        byte[]? bestJpeg = null;
+        long bestLen = 0;
+        ScanIsoBmffForPrvw(ptr, 0, fileLen, fileLen, depth: 0, ref bestJpeg, ref bestLen);
+        return bestJpeg;
     }
 
-    private static unsafe byte[]? ScanIsoBmffForPrvw(byte* ptr, long start, long end, long fileLen, int depth)
+    private static unsafe void ScanIsoBmffForPrvw(
+        byte* ptr,
+        long start,
+        long end,
+        long fileLen,
+        int depth,
+        ref byte[]? bestJpeg,
+        ref long bestLen)
     {
-        if (depth > 3) return null;
+        if (depth > 8) return;
         long pos = start;
 
         while (pos + 8 <= end)
@@ -499,38 +513,48 @@ public static class FastImageDecoder
 
             if (boxLen < headerSize || pos + boxLen > end) break;
 
-            // 'PRVW' = 0x50525657
-            if (boxType == 0x50525657)
+            // 'PRVW' = 0x50525657, 'THMB' = 0x54484D42, 'thmb' = 0x74686D62
+            if (boxType == 0x50525657 || boxType == 0x54484D42 || boxType == 0x74686D62)
             {
                 long payloadStart = pos + headerSize;
                 long payloadLen = boxLen - headerSize;
-                for (long i = 0; i + 3 < payloadLen; i++)
+                for (long i = 0; i + 3 < payloadLen && i < 256; i++)
                 {
                     if (IsJpegSoi(ptr + payloadStart + i, payloadLen - i))
                     {
                         int jpegLen = (int)(payloadLen - i);
-                        var jpeg = new byte[jpegLen];
-                        new ReadOnlySpan<byte>(ptr + payloadStart + i, jpegLen).CopyTo(jpeg);
-                        return jpeg;
+                        if (jpegLen > bestLen)
+                        {
+                            bestLen = jpegLen;
+                            var jpeg = new byte[jpegLen];
+                            new ReadOnlySpan<byte>(ptr + payloadStart + i, jpegLen).CopyTo(jpeg);
+                            bestJpeg = jpeg;
+                        }
+                        break;
                     }
                 }
             }
-            // 'uuid' = 0x75756964 (16-byte UUID after box header) or 'moov' = 0x6D6F6F76
+            // Container boxes:
+            // 'uuid' = 0x75756964 (16-byte UUID after box header)
             else if (boxType == 0x75756964 && boxLen > headerSize + 16)
             {
-                var nested = ScanIsoBmffForPrvw(ptr, pos + headerSize + 16, pos + boxLen, fileLen, depth + 1);
-                if (nested != null) return nested;
+                long childStart = pos + headerSize + 16;
+                // Canon preview UUID container (EAF42B5E...) has an 8-byte subheader (version 1): 0x00000000_00000001
+                if (childStart + 8 <= pos + boxLen && BinaryPrimitives.ReadUInt32BigEndian(new ReadOnlySpan<byte>(ptr + childStart, 4)) == 0)
+                {
+                    childStart += 8;
+                }
+                ScanIsoBmffForPrvw(ptr, childStart, pos + boxLen, fileLen, depth + 1, ref bestJpeg, ref bestLen);
             }
-            else if (boxType == 0x6D6F6F76 && boxLen > headerSize)
+            // Container boxes: 'moov', 'trak', 'mdia', 'minf', 'stbl', 'edts'
+            else if ((boxType == 0x6D6F6F76 || boxType == 0x7472616B || boxType == 0x6D646961 ||
+                      boxType == 0x6D696E66 || boxType == 0x7374626C || boxType == 0x65647473) && boxLen > headerSize)
             {
-                var nested = ScanIsoBmffForPrvw(ptr, pos + headerSize, pos + boxLen, fileLen, depth + 1);
-                if (nested != null) return nested;
+                ScanIsoBmffForPrvw(ptr, pos + headerSize, pos + boxLen, fileLen, depth + 1, ref bestJpeg, ref bestLen);
             }
 
             pos += boxLen;
         }
-
-        return null;
     }
 
     private static unsafe byte[]? ExtractTiffOrRw2Preview(byte* ptr, long fileLen)
@@ -670,7 +694,11 @@ public static class FastImageDecoder
 
     private static unsafe bool IsJpegSoi(byte* p, long availLen)
     {
-        return availLen >= 4 && p[0] == 0xFF && p[1] == 0xD8 && p[2] == 0xFF;
+        if (availLen < 4 || p[0] != 0xFF || p[1] != 0xD8 || p[2] != 0xFF) return false;
+        byte marker = p[3];
+        // Standard viewable JPEG marker: APP0..APP15 (0xE0..0xEF), DQT (0xDB), SOF0 Baseline (0xC0), SOF2 Progressive (0xC2)
+        // Explicitly excludes 0xC3 (SOF3 Lossless JPEG raw bayer sensor streams)
+        return marker is (>= 0xE0 and <= 0xEF) or 0xDB or 0xC0 or 0xC2;
     }
 
     #endregion

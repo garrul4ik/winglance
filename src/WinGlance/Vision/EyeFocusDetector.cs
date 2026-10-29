@@ -84,7 +84,7 @@ public static unsafe class EyeFocusDetector
         }
     }
 
-    public static IReadOnlyList<SubjectEyeTarget> DetectFacesAndEyes(DecodedImage image, float scoreThreshold = 0.45f)
+    public static IReadOnlyList<SubjectEyeTarget> DetectFacesAndEyes(DecodedImage image, float scoreThreshold = 0.35f)
     {
         if (image.Width < 16 || image.Height < 16 || image.Pixels.Length == 0)
         {

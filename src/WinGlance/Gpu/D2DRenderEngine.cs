@@ -643,25 +643,42 @@ public sealed class D2DRenderEngine : IDisposable
         float destW = dest.Right - dest.Left;
         float destH = dest.Bottom - dest.Top;
 
-        float scaleX = destW / slot.Source.Width;
-        float scaleY = destH / slot.Source.Height;
+        bool needsColorManagement = slot.ColorManagedEffect != null && (slot.CustomColorContext != null || _isFp16SwapChain);
+        // Direct DrawBitmap bypasses D2D intermediate effect tiling limits (>4096) and provides maximum hardware throughput for sRGB
+        bool useDirectBitmap = !needsColorManagement || slot.Source.Width > 4096 || slot.Source.Height > 4096;
 
-        // HighQualityCubic when downscaling/fitting; crisp NearestNeighbor pixel grid when >= 200% zoom
-        var interp = physScale >= 1.95f
-            ? D2DInterpolationMode.NearestNeighbor
-            : D2DInterpolationMode.HighQualityCubic;
+        if (useDirectBitmap)
+        {
+            var interpMode = physScale >= 1.95f
+                ? BitmapInterpolationMode.NearestNeighbor
+                : BitmapInterpolationMode.Linear;
+            _dc.DrawBitmap(slot.Bitmap, dest, 1.0f, interpMode, null);
+        }
+        else
+        {
+            float scaleX = destW / slot.Source.Width;
+            float scaleY = destH / slot.Source.Height;
 
-        var imgTransform = Matrix3x2.CreateScale(scaleX, scaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
-        _dc.Transform = imgTransform;
-        _dc.DrawImage(slot.ColorManagedEffect, interp, CompositeMode.SourceOver);
+            var interp = physScale >= 1.95f
+                ? D2DInterpolationMode.NearestNeighbor
+                : D2DInterpolationMode.HighQualityCubic;
+
+            var imgTransform = Matrix3x2.CreateScale(scaleX, scaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
+            _dc.Transform = imgTransform;
+            _dc.DrawImage(slot.ColorManagedEffect!, interp, CompositeMode.SourceOver);
+            _dc.Transform = Matrix3x2.Identity;
+        }
 
         // GPU Focus Peaking (Shift + F)
         if (state.ShowFocusPeaking && slot.PeakingMatrixEffect != null)
         {
+            float scaleX = destW / slot.Source.Width;
+            float scaleY = destH / slot.Source.Height;
+            var imgTransform = Matrix3x2.CreateScale(scaleX, scaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
+            _dc.Transform = imgTransform;
             _dc.DrawImage(slot.PeakingMatrixEffect, D2DInterpolationMode.Linear, CompositeMode.SourceOver);
+            _dc.Transform = Matrix3x2.Identity;
         }
-
-        _dc.Transform = Matrix3x2.Identity;
 
         // Exposure Clipping Blinkies (O) on primary pane
         if (isPrimaryPane && state.ShowClipping && _clippingBitmap != null && _clippingSource != null)
@@ -1002,7 +1019,7 @@ public sealed class D2DRenderEngine : IDisposable
         using var muted = _dc.CreateSolidColorBrush(UiColor(175, 184, 200, 0.90f));
         using var accent = _dc.CreateSolidColorBrush(UiColor(0x64, 0xB5, 0xF6, 0.95f));
 
-        _dc.DrawText("WinGlance 2.0", _fontHero, new Rect(card.Rect.Left, card.Rect.Top + 28f, w, 40f), white);
+        _dc.DrawText("WinGlance 1.2", _fontHero, new Rect(card.Rect.Left, card.Rect.Top + 28f, w, 40f), white);
 
         string sub = "Drop a folder or RAW / photo anywhere, or press Ctrl+O to browse";
         float subW = MeasureWidth(sub, _fontUiBold);
@@ -1039,7 +1056,7 @@ public sealed class D2DRenderEngine : IDisposable
         using var descBrush = _dc.CreateSolidColorBrush(UiColor(210, 216, 228, 0.92f));
         using var footerBrush = _dc.CreateSolidColorBrush(UiColor(150, 160, 178, 0.88f));
 
-        _dc.DrawText("WinGlance 2.0  —  Pro Culling, GPU & AI Vision Shortcuts", _fontCheatHeader,
+        _dc.DrawText("WinGlance 1.2  —  Pro Culling, GPU & AI Vision Shortcuts", _fontCheatHeader,
             new Rect(card.Rect.Left + 26f, card.Rect.Top + 20f, w - 52f, 28f), headerBrush);
 
         (string Key, string Desc)[] leftCol =
