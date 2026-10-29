@@ -1,77 +1,93 @@
 using System;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using WinGlance.Model;
 
 namespace WinGlance.Engine;
 
 public static class ClippingEngine
 {
-    public static BitmapSource? GenerateClippingMask(BitmapSource source)
+    public static unsafe DecodedImage? GenerateClippingMask(DecodedImage source)
     {
-        if (source.PixelWidth <= 0 || source.PixelHeight <= 0)
+        if (source.Width <= 0 || source.Height <= 0 || source.Pixels.Length == 0)
         {
             return null;
         }
 
-        BitmapSource formatted = source;
-        if (source.Format != PixelFormats.Bgra32 && source.Format != PixelFormats.Bgr32)
-        {
-            formatted = new FormatConvertedBitmap(source, PixelFormats.Bgra32, null, 0);
-        }
+        int srcW = source.Width;
+        int srcH = source.Height;
+        int maxDim = Math.Max(srcW, srcH);
 
-        var width = formatted.PixelWidth;
-        var height = formatted.PixelHeight;
-
-        // Bounding resolution for speed (max 1920 dimension)
-        var maxDim = Math.Max(width, height);
+        int dstW = srcW;
+        int dstH = srcH;
         if (maxDim > 1920)
         {
-            var scale = 1920.0 / maxDim;
-            formatted = new TransformedBitmap(formatted, new ScaleTransform(scale, scale));
-            width = formatted.PixelWidth;
-            height = formatted.PixelHeight;
+            double scale = 1920.0 / maxDim;
+            dstW = Math.Max(1, (int)Math.Round(srcW * scale));
+            dstH = Math.Max(1, (int)Math.Round(srcH * scale));
         }
 
-        var stride = width * 4;
-        var srcBytes = new byte[height * stride];
-        formatted.CopyPixels(srcBytes, stride, 0);
+        int dstStride = dstW * 4;
+        var maskBytes = new byte[dstH * dstStride];
+        bool hasClipping = false;
 
-        var maskBytes = new byte[height * stride];
-        var hasClipping = false;
-
-        unsafe
+        fixed (byte* pSrcBase = source.Pixels)
+        fixed (byte* pDstBase = maskBytes)
         {
-            fixed (byte* pSrc = srcBytes)
-            fixed (byte* pDst = maskBytes)
+            uint* pDst = (uint*)pDstBase;
+
+            if (source.PixelFormat == ImagePixelFormat.Rgba64)
             {
-                var totalPixels = width * height;
-                var src = (uint*)pSrc;
-                var dst = (uint*)pDst;
-
-                for (int i = 0; i < totalPixels; i++)
+                for (int y = 0; y < dstH; y++)
                 {
-                    var px = src[i];
-                    var b = (byte)(px & 0xFF);
-                    var g = (byte)((px >> 8) & 0xFF);
-                    var r = (byte)((px >> 16) & 0xFF);
+                    int sy = (int)((long)y * srcH / dstH);
+                    ushort* srcRow = (ushort*)(pSrcBase + (long)sy * source.Stride);
+                    uint* dstRow = pDst + y * dstW;
 
-                    if (r >= 254 || g >= 254 || b >= 254)
+                    for (int x = 0; x < dstW; x++)
                     {
-                        // Blown highlights: Warning Red (#FF0033 with alpha 225)
-                        // Bgra32: B=0x33, G=0x00, R=0xFF, A=0xE1
-                        dst[i] = 0xE1FF0033;
-                        hasClipping = true;
+                        int sx = (int)((long)x * srcW / dstW) * 4;
+                        ushort r = srcRow[sx];
+                        ushort g = srcRow[sx + 1];
+                        ushort b = srcRow[sx + 2];
+
+                        if (r >= 65020 || g >= 65020 || b >= 65020)
+                        {
+                            dstRow[x] = 0xE1FF0033; // Warning Red (B=0x33, G=0x00, R=0xFF, A=0xE1)
+                            hasClipping = true;
+                        }
+                        else if (r <= 512 && g <= 512 && b <= 512)
+                        {
+                            dstRow[x] = 0xE10066FF; // Warning Blue (B=0xFF, G=0x66, R=0x00, A=0xE1)
+                            hasClipping = true;
+                        }
                     }
-                    else if (r <= 2 && g <= 2 && b <= 2)
+                }
+            }
+            else
+            {
+                for (int y = 0; y < dstH; y++)
+                {
+                    int sy = (int)((long)y * srcH / dstH);
+                    uint* srcRow = (uint*)(pSrcBase + (long)sy * source.Stride);
+                    uint* dstRow = pDst + y * dstW;
+
+                    for (int x = 0; x < dstW; x++)
                     {
-                        // Crushed shadows: Warning Blue (#0066FF with alpha 225)
-                        // Bgra32: B=0xFF, G=0x66, R=0x00, A=0xE1
-                        dst[i] = 0xE10066FF;
-                        hasClipping = true;
-                    }
-                    else
-                    {
-                        dst[i] = 0; // transparent
+                        int sx = (int)((long)x * srcW / dstW);
+                        uint px = srcRow[sx];
+                        byte b = (byte)(px & 0xFF);
+                        byte g = (byte)((px >> 8) & 0xFF);
+                        byte r = (byte)((px >> 16) & 0xFF);
+
+                        if (r >= 254 || g >= 254 || b >= 254)
+                        {
+                            dstRow[x] = 0xE1FF0033;
+                            hasClipping = true;
+                        }
+                        else if (r <= 2 && g <= 2 && b <= 2)
+                        {
+                            dstRow[x] = 0xE10066FF;
+                            hasClipping = true;
+                        }
                     }
                 }
             }
@@ -79,15 +95,16 @@ public static class ClippingEngine
 
         if (!hasClipping) return null;
 
-        var mask = BitmapSource.Create(
-            width, height,
-            96, 96,
-            PixelFormats.Bgra32,
-            null,
-            maskBytes,
-            stride
+        return new DecodedImage(
+            pixels: maskBytes,
+            width: dstW,
+            height: dstH,
+            stride: dstStride,
+            pixelFormat: ImagePixelFormat.Bgra32,
+            originalWidth: source.OriginalWidth,
+            originalHeight: source.OriginalHeight,
+            isDownscaled: dstW < srcW || dstH < srcH,
+            isRaw: false
         );
-        mask.Freeze();
-        return mask;
     }
 }

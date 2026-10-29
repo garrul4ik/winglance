@@ -1,10 +1,13 @@
 using System;
+using System.Buffers.Binary;
 using System.IO;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using System.Text;
 using System.Xml.Linq;
+using Sdcb.LibRaw;
+using Vortice.WIC;
 using WinGlance.Engine;
 using WinGlance.Model;
+using WinGlance.Vision;
 using Xunit;
 
 namespace WinGlance.Tests;
@@ -98,17 +101,60 @@ public class WinGlanceTests
     [Fact]
     public void TestLosslessRotationTransitions()
     {
-        // Clockwise: 1 -> 6 -> 3 -> 8 -> 1
         Assert.Equal(6, LosslessRotationEngine.NextOrientation(1, RotationDirection.Clockwise));
         Assert.Equal(3, LosslessRotationEngine.NextOrientation(6, RotationDirection.Clockwise));
         Assert.Equal(8, LosslessRotationEngine.NextOrientation(3, RotationDirection.Clockwise));
         Assert.Equal(1, LosslessRotationEngine.NextOrientation(8, RotationDirection.Clockwise));
 
-        // Counter-Clockwise: 1 -> 8 -> 3 -> 6 -> 1
         Assert.Equal(8, LosslessRotationEngine.NextOrientation(1, RotationDirection.CounterClockwise));
         Assert.Equal(3, LosslessRotationEngine.NextOrientation(8, RotationDirection.CounterClockwise));
         Assert.Equal(6, LosslessRotationEngine.NextOrientation(3, RotationDirection.CounterClockwise));
         Assert.Equal(1, LosslessRotationEngine.NextOrientation(6, RotationDirection.CounterClockwise));
+    }
+
+    [Fact]
+    public void TestLosslessJpegExifRotationPreservesCompressedScanBitForBit()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"WinGlanceRot_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var jpgPath = Path.Combine(tempDir, "portrait.jpg");
+            byte[] initialJpeg = CreateTestJpegBytes(80, 40);
+            File.WriteAllBytes(jpgPath, initialJpeg);
+
+            byte[] originalScan = ExtractJpegSosToEnd(initialJpeg);
+            Assert.True(originalScan.Length > 32);
+
+            var item = new SlideItem(jpgPath, fileSize: initialJpeg.Length);
+
+            // 1st CW rotation: injects APP1 Exif with Orientation = 6 (90 CW)
+            int o1 = LosslessRotationEngine.Rotate(item, RotationDirection.Clockwise);
+            Assert.Equal(6, o1);
+
+            byte[] afterFirst = File.ReadAllBytes(jpgPath);
+            Assert.Equal(originalScan, ExtractJpegSosToEnd(afterFirst));
+
+            // Delete XMP sidecar to prove embedded binary EXIF tag 0x0112 alone drives orientation!
+            var sidecar = XmpSidecarManager.ExistingSidecarPath(jpgPath);
+            if (sidecar != null) File.Delete(sidecar);
+
+            Assert.Equal(6, FastImageDecoder.ReadExifMetadata(jpgPath)?.Orientation);
+            var decodedRotated = FastImageDecoder.Decode(jpgPath);
+            Assert.Equal(40, decodedRotated.Width);
+            Assert.Equal(80, decodedRotated.Height);
+
+            // 2nd CW rotation: patches existing 0x0112 tag in-place (exact same file length & scan!)
+            long sizeBeforeInPlace = new FileInfo(jpgPath).Length;
+            int o2 = LosslessRotationEngine.Rotate(item, RotationDirection.Clockwise);
+            Assert.Equal(3, o2);
+            Assert.Equal(sizeBeforeInPlace, new FileInfo(jpgPath).Length);
+            Assert.Equal(3, FastImageDecoder.ReadExifMetadata(jpgPath)?.Orientation);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+        }
     }
 
     [Fact]
@@ -144,87 +190,311 @@ public class WinGlanceTests
     public void TestSupportedFormats()
     {
         Assert.True(SupportedFormats.IsSupported("photo.jpg"));
+        Assert.True(SupportedFormats.IsSupported("photo.avif"));
+        Assert.True(SupportedFormats.IsSupported("photo.jxl"));
         Assert.True(SupportedFormats.IsSupported("photo.CR3"));
         Assert.True(SupportedFormats.IsSupported("photo.ARW"));
         Assert.True(SupportedFormats.IsSupported("photo.NEF"));
         Assert.True(SupportedFormats.IsSupported("photo.RAF"));
+        Assert.True(SupportedFormats.IsSupported("photo.RW2"));
+        Assert.True(SupportedFormats.IsSupported("photo.IIQ"));
         Assert.True(SupportedFormats.IsSupported("photo.dng"));
         Assert.True(SupportedFormats.IsSupported("photo.webp"));
         Assert.False(SupportedFormats.IsSupported("document.pdf"));
         Assert.False(SupportedFormats.IsSupported("script.ps1"));
 
         Assert.True(SupportedFormats.IsRaw("photo.ARW"));
+        Assert.True(SupportedFormats.IsRaw("photo.RAF"));
+        Assert.True(SupportedFormats.IsRaw("photo.RW2"));
         Assert.False(SupportedFormats.IsRaw("photo.PNG"));
     }
 
     [Fact]
-    public void TestHistogramEngineCalculation()
+    public void TestHistogramEngine8BitAnd16Bit()
     {
-        // 100x100 solid red image (R=255, G=0, B=0, A=255)
-        var width = 100;
-        var height = 100;
-        var stride = width * 4;
-        var pixels = new byte[height * stride];
-
-        for (int i = 0; i < pixels.Length; i += 4)
+        // 1. 8-bit BGRA32 (100x100 solid red)
+        int width = 100, height = 100, stride8 = width * 4;
+        var px8 = new byte[height * stride8];
+        for (int i = 0; i < px8.Length; i += 4)
         {
-            pixels[i] = 0;     // Blue
-            pixels[i + 1] = 0; // Green
-            pixels[i + 2] = 255; // Red
-            pixels[i + 3] = 255; // Alpha
+            px8[i] = 0;
+            px8[i + 1] = 0;
+            px8[i + 2] = 255;
+            px8[i + 3] = 255;
         }
+        var img8 = new DecodedImage(px8, width, height, stride8, ImagePixelFormat.Bgra32, width, height, false, false);
+        var hist8 = HistogramEngine.Compute(img8);
+        Assert.Equal(10000, hist8.Red[255]);
+        Assert.Equal(10000, hist8.Green[0]);
+        Assert.Equal(10000, hist8.Blue[0]);
 
-        var bmp = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, stride);
-        bmp.Freeze();
-
-        var hist = HistogramEngine.Compute(bmp);
-
-        Assert.Equal(10000, hist.Red[255]);
-        Assert.Equal(10000, hist.Green[0]);
-        Assert.Equal(10000, hist.Blue[0]);
-        Assert.True(hist.MaxCount >= 10000);
+        // 2. 16-bit RGBA64 (50x50 pure green R=0, G=65535, B=0, A=65535)
+        int w16 = 50, h16 = 50, stride16 = w16 * 8;
+        var px16 = new byte[h16 * stride16];
+        for (int i = 0; i < px16.Length; i += 8)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(px16.AsSpan(i + 2, 2), 65535);
+            BinaryPrimitives.WriteUInt16LittleEndian(px16.AsSpan(i + 6, 2), 65535);
+        }
+        var img16 = new DecodedImage(px16, w16, h16, stride16, ImagePixelFormat.Rgba64, w16, h16, false, true, true);
+        var hist16 = HistogramEngine.Compute(img16);
+        Assert.Equal(2500, hist16.Green[255]);
+        Assert.Equal(2500, hist16.Red[0]);
+        Assert.Equal(2500, hist16.Blue[0]);
     }
 
     [Fact]
-    public void TestClippingEngineHighlightAndShadow()
+    public void TestClippingEngine8BitAnd16Bit()
     {
-        // 2x2 image:
-        // px 0: pure white (255,255,255) -> blown highlight
-        // px 1: pure black (0,0,0) -> crushed shadow
-        // px 2, 3: neutral gray (128,128,128) -> no clipping
-        var width = 2;
-        var height = 2;
-        var stride = width * 4;
+        // 8-bit 2x2: white, black, gray, gray
+        var px8 = new byte[16]
+        {
+            255, 255, 255, 255,
+            0, 0, 0, 255,
+            128, 128, 128, 255,
+            128, 128, 128, 255
+        };
+        var img8 = new DecodedImage(px8, 2, 2, 8, ImagePixelFormat.Bgra32, 2, 2, false, false);
+        var mask8 = ClippingEngine.GenerateClippingMask(img8);
+        Assert.NotNull(mask8);
+        Assert.Equal(0xFF, mask8.Pixels[2]); // Red highlight warning
+        Assert.Equal(0xE1, mask8.Pixels[3]);
+        Assert.Equal(0xFF, mask8.Pixels[4]); // Blue shadow warning
+        Assert.Equal(0xE1, mask8.Pixels[7]);
+        Assert.Equal(0, mask8.Pixels[11]);   // Midtone transparent
+
+        // 16-bit 2x1: pixel 0 blown (65500), pixel 1 midtone (32768)
+        var px16 = new byte[16];
+        BinaryPrimitives.WriteUInt16LittleEndian(px16.AsSpan(0, 2), 65500);
+        BinaryPrimitives.WriteUInt16LittleEndian(px16.AsSpan(6, 2), 65535);
+        BinaryPrimitives.WriteUInt16LittleEndian(px16.AsSpan(8, 2), 32768);
+        BinaryPrimitives.WriteUInt16LittleEndian(px16.AsSpan(10, 2), 32768);
+        BinaryPrimitives.WriteUInt16LittleEndian(px16.AsSpan(12, 2), 32768);
+        BinaryPrimitives.WriteUInt16LittleEndian(px16.AsSpan(14, 2), 65535);
+
+        var img16 = new DecodedImage(px16, 2, 1, 16, ImagePixelFormat.Rgba64, 2, 1, false, true, true);
+        var mask16 = ClippingEngine.GenerateClippingMask(img16);
+        Assert.NotNull(mask16);
+        Assert.Equal(0xFF, mask16.Pixels[2]);
+        Assert.Equal(0, mask16.Pixels[7]);
+    }
+
+    [Fact]
+    public void TestZeroCopyMemoryMappedRawPreviews_Raf_Cr3_Rw2_Arw()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"WinGlanceRaw_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            byte[] previewJpeg = CreateTestJpegBytes(96, 64);
+            Assert.True(previewJpeg.Length > 300);
+
+            // 1. Fujifilm .RAF ("FUJIFILMCCD-RAW " + offset @ 0x54 + len @ 0x58)
+            var rafPath = Path.Combine(tempDir, "DSCF0001.RAF");
+            var rafBytes = new byte[0x80 + previewJpeg.Length];
+            "FUJIFILMCCD-RAW "u8.CopyTo(rafBytes.AsSpan(0, 16));
+            BinaryPrimitives.WriteUInt32BigEndian(rafBytes.AsSpan(0x54, 4), 0x80);
+            BinaryPrimitives.WriteUInt32BigEndian(rafBytes.AsSpan(0x58, 4), (uint)previewJpeg.Length);
+            previewJpeg.CopyTo(rafBytes.AsSpan(0x80));
+            File.WriteAllBytes(rafPath, rafBytes);
+
+            var rafDecoded = FastImageDecoder.Decode(rafPath, maxBoundingPixelSize: 1920);
+            Assert.True(rafDecoded.IsRaw);
+            Assert.Equal(96, rafDecoded.Width);
+            Assert.Equal(64, rafDecoded.Height);
+
+            // 2. Canon .CR3 (ISOBMFF uuid container + PRVW box)
+            var cr3Path = Path.Combine(tempDir, "IMG_0001.CR3");
+            int prvwBoxLen = 8 + 6 + previewJpeg.Length;
+            int uuidBoxLen = 8 + 16 + prvwBoxLen;
+            var cr3Bytes = new byte[uuidBoxLen];
+            BinaryPrimitives.WriteUInt32BigEndian(cr3Bytes.AsSpan(0, 4), (uint)uuidBoxLen);
+            "uuid"u8.CopyTo(cr3Bytes.AsSpan(4, 4));
+            BinaryPrimitives.WriteUInt32BigEndian(cr3Bytes.AsSpan(24, 4), (uint)prvwBoxLen);
+            "PRVW"u8.CopyTo(cr3Bytes.AsSpan(28, 4));
+            previewJpeg.CopyTo(cr3Bytes.AsSpan(38));
+            File.WriteAllBytes(cr3Path, cr3Bytes);
+
+            var cr3Decoded = FastImageDecoder.Decode(cr3Path, maxBoundingPixelSize: 1920);
+            Assert.True(cr3Decoded.IsRaw);
+            Assert.Equal(96, cr3Decoded.Width);
+
+            // 3. Panasonic .RW2 (II + magic 0x0055 + IFD0 tag 0x002E JpgFromRaw)
+            var rw2Path = Path.Combine(tempDir, "P1000001.RW2");
+            var rw2Bytes = new byte[64 + previewJpeg.Length];
+            rw2Bytes[0] = (byte)'I'; rw2Bytes[1] = (byte)'I';
+            BinaryPrimitives.WriteUInt16LittleEndian(rw2Bytes.AsSpan(2, 2), 0x0055);
+            BinaryPrimitives.WriteUInt32LittleEndian(rw2Bytes.AsSpan(4, 4), 8); // IFD0 @ 8
+            BinaryPrimitives.WriteUInt16LittleEndian(rw2Bytes.AsSpan(8, 2), 1); // 1 entry
+            BinaryPrimitives.WriteUInt16LittleEndian(rw2Bytes.AsSpan(10, 2), 0x002E); // JpgFromRaw
+            BinaryPrimitives.WriteUInt16LittleEndian(rw2Bytes.AsSpan(12, 2), 7);
+            BinaryPrimitives.WriteUInt32LittleEndian(rw2Bytes.AsSpan(14, 4), (uint)previewJpeg.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(rw2Bytes.AsSpan(18, 4), 64);
+            previewJpeg.CopyTo(rw2Bytes.AsSpan(64));
+            File.WriteAllBytes(rw2Path, rw2Bytes);
+
+            var rw2Decoded = FastImageDecoder.Decode(rw2Path, maxBoundingPixelSize: 1920);
+            Assert.True(rw2Decoded.IsRaw);
+            Assert.Equal(96, rw2Decoded.Width);
+
+            // 4. Sony .ARW (TIFF SubIFDs tag 0x014A -> SubIFD 0x0201/0x0202)
+            var arwPath = Path.Combine(tempDir, "_DSC0001.ARW");
+            var arwBytes = new byte[128 + previewJpeg.Length];
+            arwBytes[0] = (byte)'I'; arwBytes[1] = (byte)'I';
+            BinaryPrimitives.WriteUInt16LittleEndian(arwBytes.AsSpan(2, 2), 42);
+            BinaryPrimitives.WriteUInt32LittleEndian(arwBytes.AsSpan(4, 4), 8); // IFD0 @ 8
+            BinaryPrimitives.WriteUInt16LittleEndian(arwBytes.AsSpan(8, 2), 1);
+            BinaryPrimitives.WriteUInt16LittleEndian(arwBytes.AsSpan(10, 2), 0x014A); // SubIFDs
+            BinaryPrimitives.WriteUInt16LittleEndian(arwBytes.AsSpan(12, 2), 4);
+            BinaryPrimitives.WriteUInt32LittleEndian(arwBytes.AsSpan(14, 4), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(arwBytes.AsSpan(18, 4), 40); // SubIFD @ 40
+
+            BinaryPrimitives.WriteUInt16LittleEndian(arwBytes.AsSpan(40, 2), 2);
+            BinaryPrimitives.WriteUInt16LittleEndian(arwBytes.AsSpan(42, 2), 0x0201); // Offset
+            BinaryPrimitives.WriteUInt16LittleEndian(arwBytes.AsSpan(44, 2), 4);
+            BinaryPrimitives.WriteUInt32LittleEndian(arwBytes.AsSpan(46, 4), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(arwBytes.AsSpan(50, 4), 128);
+
+            BinaryPrimitives.WriteUInt16LittleEndian(arwBytes.AsSpan(54, 2), 0x0202); // Length
+            BinaryPrimitives.WriteUInt16LittleEndian(arwBytes.AsSpan(56, 2), 4);
+            BinaryPrimitives.WriteUInt32LittleEndian(arwBytes.AsSpan(58, 4), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(arwBytes.AsSpan(62, 4), (uint)previewJpeg.Length);
+
+            previewJpeg.CopyTo(arwBytes.AsSpan(128));
+            File.WriteAllBytes(arwPath, arwBytes);
+
+            var arwDecoded = FastImageDecoder.Decode(arwPath, maxBoundingPixelSize: 1920);
+            Assert.True(arwDecoded.IsRaw);
+            Assert.Equal(96, arwDecoded.Width);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+        }
+    }
+
+    [Fact]
+    public void TestIccProfileNameDetection_V2AndV4()
+    {
+        // ICC v4 'mluc' Display P3
+        byte[] iccP3 = new byte[220];
+        BinaryPrimitives.WriteUInt32BigEndian(iccP3.AsSpan(128, 4), 1); // 1 tag
+        "desc"u8.CopyTo(iccP3.AsSpan(132, 4));
+        BinaryPrimitives.WriteUInt32BigEndian(iccP3.AsSpan(136, 4), 144); // tag offset
+        BinaryPrimitives.WriteUInt32BigEndian(iccP3.AsSpan(140, 4), 60);  // tag size
+
+        "mluc"u8.CopyTo(iccP3.AsSpan(144, 4));
+        BinaryPrimitives.WriteUInt32BigEndian(iccP3.AsSpan(152, 4), 1);  // 1 record
+        BinaryPrimitives.WriteUInt32BigEndian(iccP3.AsSpan(156, 4), 12); // record size
+        byte[] utf16P3 = Encoding.BigEndianUnicode.GetBytes("Display P3");
+        BinaryPrimitives.WriteUInt32BigEndian(iccP3.AsSpan(164, 4), (uint)utf16P3.Length);
+        BinaryPrimitives.WriteUInt32BigEndian(iccP3.AsSpan(168, 4), 28); // offset relative to 144 -> 172
+        utf16P3.CopyTo(iccP3.AsSpan(172));
+
+        Assert.Equal("Display P3", FastImageDecoder.DetectIccProfileName(iccP3));
+
+        // ICC v2 'desc' Adobe RGB (1998)
+        byte[] iccAdobe = new byte[220];
+        BinaryPrimitives.WriteUInt32BigEndian(iccAdobe.AsSpan(128, 4), 1);
+        "desc"u8.CopyTo(iccAdobe.AsSpan(132, 4));
+        BinaryPrimitives.WriteUInt32BigEndian(iccAdobe.AsSpan(136, 4), 144);
+        BinaryPrimitives.WriteUInt32BigEndian(iccAdobe.AsSpan(140, 4), 48);
+
+        "desc"u8.CopyTo(iccAdobe.AsSpan(144, 4));
+        byte[] asciiAdobe = Encoding.ASCII.GetBytes("Adobe RGB (1998)\0");
+        BinaryPrimitives.WriteUInt32BigEndian(iccAdobe.AsSpan(152, 4), (uint)asciiAdobe.Length);
+        asciiAdobe.CopyTo(iccAdobe.AsSpan(156));
+
+        Assert.Equal("Adobe RGB", FastImageDecoder.DetectIccProfileName(iccAdobe));
+    }
+
+    [Fact]
+    public void TestEmbeddedLibRawRuntimeLoads1000PlusCameras()
+    {
+        NativeRuntimeLoader.EnsureLibRawLoaded();
+        var cameras = RawContext.SupportedCameras;
+        Assert.NotNull(cameras);
+        Assert.True(cameras.Length > 1000, $"Expected >1000 supported RAW cameras, got {cameras.Length}");
+    }
+
+    [Fact]
+    public void TestDirectMlYuNetVisionEngineLoadsAndInfers()
+    {
+        Assert.True(EyeFocusDetector.IsNeuralEngineAvailable);
+        Assert.Contains(EyeFocusDetector.ActiveBackend, new[] { "DirectML GPU", "ONNX CPU" });
+
+        int w = 320, h = 240, stride = w * 4;
+        var px = new byte[h * stride];
+        for (int y = 0; y < h; y++)
+        {
+            for (int x = 0; x < w; x++)
+            {
+                int i = y * stride + x * 4;
+                // Add crisp checkerboard patch near (200, 80) to also exercise sharpness focus fallback
+                bool checker = x is >= 180 and <= 220 && y is >= 60 and <= 100 && ((x + y) & 1) == 0;
+                byte v = checker ? (byte)250 : (byte)40;
+                px[i] = v;
+                px[i + 1] = v;
+                px[i + 2] = v;
+                px[i + 3] = 255;
+            }
+        }
+
+        var img = new DecodedImage(px, w, h, stride, ImagePixelFormat.Bgra32, w, h, false, false);
+        var stops = EyeFocusDetector.BuildJumpSequence(img);
+        Assert.NotEmpty(stops);
+        Assert.InRange(stops[0].Point.X, 0f, 1f);
+        Assert.InRange(stops[0].Point.Y, 0f, 1f);
+    }
+
+    private static byte[] CreateTestJpegBytes(int width, int height)
+    {
+        using var wic = new IWICImagingFactory2();
+        int stride = width * 4;
         var pixels = new byte[height * stride];
+        var rng = new Random(42);
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                int i = y * stride + x * 4;
+                pixels[i + 0] = (byte)((x * 3 + rng.Next(40)) & 0xFF);
+                pixels[i + 1] = (byte)((y * 5 + rng.Next(40)) & 0xFF);
+                pixels[i + 2] = (byte)(((x ^ y) * 7 + rng.Next(40)) & 0xFF);
+                pixels[i + 3] = 255;
+            }
+        }
 
-        // Px 0: White
-        pixels[0] = 255; pixels[1] = 255; pixels[2] = 255; pixels[3] = 255;
-        // Px 1: Black
-        pixels[4] = 0; pixels[5] = 0; pixels[6] = 0; pixels[7] = 255;
-        // Px 2: Gray
-        pixels[8] = 128; pixels[9] = 128; pixels[10] = 128; pixels[11] = 255;
-        // Px 3: Gray
-        pixels[12] = 128; pixels[13] = 128; pixels[14] = 128; pixels[15] = 255;
+        using var ms = new MemoryStream();
+        using var encoder = wic.CreateEncoder(ContainerFormat.Jpeg, ms, BitmapEncoderCacheOption.NoCache);
+        using var frame = encoder.CreateNewFrame(out var props);
+        props?.Dispose();
+        frame.Initialize();
+        frame.SetSize((uint)width, (uint)height);
+        Guid fmt = PixelFormat.Format24bppBGR;
+        using var bmp = wic.CreateBitmapFromMemory((uint)width, (uint)height, PixelFormat.Format32bppBGRA, pixels, (uint)stride);
+        frame.SetPixelFormat(ref fmt);
+        frame.WriteSource(bmp);
+        frame.Commit();
+        encoder.Commit();
+        return ms.ToArray();
+    }
 
-        var bmp = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, stride);
-        bmp.Freeze();
-
-        var mask = ClippingEngine.GenerateClippingMask(bmp);
-        Assert.NotNull(mask);
-
-        var maskPixels = new byte[height * stride];
-        mask.CopyPixels(maskPixels, stride, 0);
-
-        // White pixel should have red warning overlay (B=0x33, G=0x00, R=0xFF, A=0xE1)
-        Assert.Equal(0xFF, maskPixels[2]); // Red
-        Assert.Equal(0xE1, maskPixels[3]); // Alpha
-
-        // Black pixel should have blue warning overlay (B=0xFF, G=0x66, R=0x00, A=0xE1)
-        Assert.Equal(0xFF, maskPixels[4]); // Blue
-        Assert.Equal(0xE1, maskPixels[7]); // Alpha
-
-        // Gray pixels should be transparent (Alpha = 0)
-        Assert.Equal(0, maskPixels[11]);
-        Assert.Equal(0, maskPixels[15]);
+    private static byte[] ExtractJpegSosToEnd(byte[] jpeg)
+    {
+        int pos = 2;
+        while (pos + 4 <= jpeg.Length)
+        {
+            if (jpeg[pos] != 0xFF) break;
+            while (pos < jpeg.Length && jpeg[pos] == 0xFF) pos++;
+            byte marker = jpeg[pos++];
+            if (marker == 0xDA) // SOS
+            {
+                return jpeg[(pos - 2)..];
+            }
+            ushort len = BinaryPrimitives.ReadUInt16BigEndian(jpeg.AsSpan(pos, 2));
+            pos += len;
+        }
+        return Array.Empty<byte>();
     }
 }

@@ -1,5 +1,5 @@
 using System;
-using System.Windows.Media.Imaging;
+using WinGlance.Model;
 
 namespace WinGlance.Engine;
 
@@ -22,72 +22,68 @@ public sealed record HistogramData(
 
 public static class HistogramEngine
 {
-    public static HistogramData Compute(BitmapSource source)
+    public static unsafe HistogramData Compute(DecodedImage image)
     {
-        if (source.PixelWidth <= 0 || source.PixelHeight <= 0)
+        if (image.Width <= 0 || image.Height <= 0 || image.Pixels.Length == 0)
         {
             return HistogramData.Empty;
         }
 
-        // Convert to Bgra32 if not already
-        BitmapSource formatted = source;
-        if (source.Format != System.Windows.Media.PixelFormats.Bgra32 &&
-            source.Format != System.Windows.Media.PixelFormats.Bgr32)
-        {
-            formatted = new FormatConvertedBitmap(source, System.Windows.Media.PixelFormats.Bgra32, null, 0);
-        }
-
-        var width = formatted.PixelWidth;
-        var height = formatted.PixelHeight;
-
-        // Bounding resolution for speed (at most 1920 max dim for histogram calculation)
-        var maxDim = Math.Max(width, height);
-        if (maxDim > 1920)
-        {
-            var scale = 1920.0 / maxDim;
-            var targetW = (int)(width * scale);
-            var targetH = (int)(height * scale);
-            formatted = new TransformedBitmap(formatted, new System.Windows.Media.ScaleTransform(scale, scale));
-            width = formatted.PixelWidth;
-            height = formatted.PixelHeight;
-        }
-
-        var stride = width * 4;
-        var pixelBytes = new byte[height * stride];
-        formatted.CopyPixels(pixelBytes, stride, 0);
+        int width = image.Width;
+        int height = image.Height;
+        int stride = image.Stride;
+        int step = Math.Max(1, Math.Max(width, height) / 1920);
 
         var rHist = new int[256];
         var gHist = new int[256];
         var bHist = new int[256];
         var lumHist = new int[256];
 
-        int peak = 1;
-
-        unsafe
+        fixed (byte* basePtr = image.Pixels)
         {
-            fixed (byte* ptr = pixelBytes)
+            if (image.PixelFormat == ImagePixelFormat.Rgba64)
             {
-                var totalPixels = width * height;
-                var p = (uint*)ptr;
-
-                for (int i = 0; i < totalPixels; i++)
+                for (int y = 0; y < height; y += step)
                 {
-                    var px = p[i];
-                    var b = (int)(px & 0xFF);
-                    var g = (int)((px >> 8) & 0xFF);
-                    var r = (int)((px >> 16) & 0xFF);
+                    ushort* row = (ushort*)(basePtr + (long)y * stride);
+                    for (int x = 0; x < width; x += step)
+                    {
+                        int idx = x * 4;
+                        int r = row[idx] >> 8;
+                        int g = row[idx + 1] >> 8;
+                        int b = row[idx + 2] >> 8;
+                        int lum = (54 * r + 183 * g + 19 * b) >> 8;
 
-                    // Rec. 709 Luminance: (54*R + 183*G + 19*B) >> 8
-                    var lum = (54 * r + 183 * g + 19 * b) >> 8;
+                        rHist[r]++;
+                        gHist[g]++;
+                        bHist[b]++;
+                        lumHist[lum]++;
+                    }
+                }
+            }
+            else
+            {
+                for (int y = 0; y < height; y += step)
+                {
+                    uint* row = (uint*)(basePtr + (long)y * stride);
+                    for (int x = 0; x < width; x += step)
+                    {
+                        uint px = row[x];
+                        int b = (int)(px & 0xFF);
+                        int g = (int)((px >> 8) & 0xFF);
+                        int r = (int)((px >> 16) & 0xFF);
+                        int lum = (54 * r + 183 * g + 19 * b) >> 8;
 
-                    rHist[r]++;
-                    gHist[g]++;
-                    bHist[b]++;
-                    lumHist[lum]++;
+                        rHist[r]++;
+                        gHist[g]++;
+                        bHist[b]++;
+                        lumHist[lum]++;
+                    }
                 }
             }
         }
 
+        int peak = 1;
         for (int i = 0; i < 256; i++)
         {
             if (rHist[i] > peak) peak = rHist[i];

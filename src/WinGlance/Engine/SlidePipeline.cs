@@ -36,14 +36,27 @@ public sealed class SlidePipeline
         _currentIndex = Math.Clamp(initialIndex, 0, Math.Max(0, items.Count - 1));
         _maxPixelSize = maxPixelSize;
 
-        PreloadWindow(_currentIndex, isForward: true);
+        if (_items.Count > 0)
+        {
+            PreloadWindow(_currentIndex, isForward: true);
+        }
+    }
+
+    public void Invalidate(int index)
+    {
+        _cache.TryRemove(index, out _);
+        _fullResCache.TryRemove(index, out _);
+        _inFlightTasks.TryRemove(index, out _);
     }
 
     public void UpdateBoundingSize(int newSize)
     {
         if (_maxPixelSize == newSize || newSize <= 0) return;
         _maxPixelSize = newSize;
-        PreloadWindow(_currentIndex, isForward: true);
+        if (_items.Count > 0)
+        {
+            PreloadWindow(_currentIndex, isForward: true);
+        }
     }
 
     public async Task<DecodedImage> GetImageAsync(int index, CancellationToken ct = default)
@@ -53,19 +66,16 @@ public sealed class SlidePipeline
             throw new ArgumentOutOfRangeException(nameof(index), $"Index {index} out of bounds.");
         }
 
-        // 1. Check cache hit (0ms)
         if (_cache.TryGetValue(index, out var cached))
         {
             return cached;
         }
 
-        // 2. Check if task already in-flight
         if (_inFlightTasks.TryGetValue(index, out var existingTask))
         {
             return await existingTask;
         }
 
-        // 3. Kick off immediate decode
         var item = _items[index];
         var bounding = _maxPixelSize;
 
@@ -93,24 +103,23 @@ public sealed class SlidePipeline
 
         var item = _items[index];
 
-        // 1. If screen-bounded image is not downscaled, reuse it
-        if (!item.IsStacked && _cache.TryGetValue(index, out var screenCached) && !screenCached.IsDownscaled)
+        // Reuse screen-bounded image only if not downscaled AND not a RAW preview awaiting 16-bit sensor demosaic
+        if (!item.IsStacked &&
+            _cache.TryGetValue(index, out var screenCached) &&
+            !screenCached.IsDownscaled &&
+            (!screenCached.IsRaw || screenCached.IsFullSensorRaw))
         {
             return screenCached;
         }
 
-        // 2. Check full-res cache
         if (_fullResCache.TryGetValue(index, out var fullCached))
         {
             return fullCached;
         }
 
-        // 3. For stacked RAW+JPEG, target the RAW master
         var targetPath = item.RawPath ?? item.Path;
-
         var decoded = await Task.Run(() => FastImageDecoder.Decode(targetPath, maxBoundingPixelSize: 0), ct);
 
-        // Limit full-res cache to 2 images to avoid high memory usage
         if (_fullResCache.Count >= 2)
         {
             _fullResCache.Clear();
@@ -123,7 +132,10 @@ public sealed class SlidePipeline
     public void NotifyCurrentIndexChanged(int newIndex, bool isForward)
     {
         _currentIndex = Math.Clamp(newIndex, 0, Math.Max(0, _items.Count - 1));
-        PreloadWindow(_currentIndex, isForward);
+        if (_items.Count > 0)
+        {
+            PreloadWindow(_currentIndex, isForward);
+        }
     }
 
     private void PreloadWindow(int centerIndex, bool isForward)
@@ -136,7 +148,6 @@ public sealed class SlidePipeline
         var indicesToKeep = new HashSet<int>();
         var indicesToPreload = new List<int>();
 
-        // Priority order: next in movement direction first
         if (isForward)
         {
             for (int r = 1; r <= _cacheRadius; r++)
@@ -161,7 +172,6 @@ public sealed class SlidePipeline
         indicesToKeep.Add(centerIndex);
         foreach (var idx in indicesToPreload) indicesToKeep.Add(idx);
 
-        // Evict items outside keep window
         foreach (var key in _cache.Keys)
         {
             if (!indicesToKeep.Contains(key))
@@ -170,7 +180,6 @@ public sealed class SlidePipeline
             }
         }
 
-        // Preload missing items in background
         _ = Task.Run(async () =>
         {
             foreach (var idx in indicesToPreload)
