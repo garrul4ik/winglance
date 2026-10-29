@@ -1205,6 +1205,35 @@ public sealed class NativeGlanceWindow : IDisposable
                     return 0;
                 }
 
+            case WM_RBUTTONDOWN:
+            case WM_MBUTTONDOWN:
+                WakeHud();
+                return 0;
+
+            case WM_RBUTTONUP:
+                {
+                    WakeHud();
+                    var pt = UnpackPoint(lParam);
+                    float s = _renderer.DpiScale;
+                    bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                    if (shift)
+                    {
+                        _ = TriggerAiEyeJumpAsync();
+                    }
+                    else
+                    {
+                        ToggleOneToOneZoom(new Vector2(pt.X / s, pt.Y / s));
+                    }
+                    return 0;
+                }
+
+            case WM_MBUTTONUP:
+                {
+                    WakeHud();
+                    _ = TriggerAiEyeJumpAsync();
+                    return 0;
+                }
+
             case WM_MOUSEMOVE:
                 {
                     var pt = UnpackPoint(lParam);
@@ -1365,6 +1394,10 @@ public sealed class NativeGlanceWindow : IDisposable
     private const uint WM_LBUTTONDOWN = 0x0201;
     private const uint WM_LBUTTONUP = 0x0202;
     private const uint WM_LBUTTONDBLCLK = 0x0203;
+    private const uint WM_RBUTTONDOWN = 0x0204;
+    private const uint WM_RBUTTONUP = 0x0205;
+    private const uint WM_MBUTTONDOWN = 0x0207;
+    private const uint WM_MBUTTONUP = 0x0208;
     private const uint WM_MOUSEWHEEL = 0x020A;
     private const uint WM_DROPFILES = 0x0233;
     private const uint WM_DPICHANGED = 0x02E0;

@@ -485,6 +485,131 @@ public class WinGlanceTests
         }
     }
 
+    [Fact]
+    public void TestDpiAwareDrawImageScalingMatchesDrawBitmap()
+    {
+        var levels = new[] { Vortice.Direct3D.FeatureLevel.Level_11_1, Vortice.Direct3D.FeatureLevel.Level_11_0 };
+        Vortice.Direct3D11.D3D11.D3D11CreateDevice(null, Vortice.Direct3D.DriverType.Hardware, Vortice.Direct3D11.DeviceCreationFlags.BgraSupport, levels, out Vortice.Direct3D11.ID3D11Device d3d, out Vortice.Direct3D11.ID3D11DeviceContext _);
+        if (d3d == null) return;
+
+        using var factory = Vortice.Direct2D1.D2D1.D2D1CreateFactory<Vortice.Direct2D1.ID2D1Factory6>();
+        using var dxgi = d3d.QueryInterface<Vortice.DXGI.IDXGIDevice>();
+        using var d2dDevice = factory.CreateDevice(dxgi);
+        using var dc = d2dDevice.CreateDeviceContext(Vortice.Direct2D1.DeviceContextOptions.None);
+
+        float dpi = 144.0f; // 150% scaling
+        float dpiScale = dpi / 96.0f; // 1.5
+        dc.SetDpi(dpi, dpi);
+
+        int pixelW = 1024;
+        int pixelH = 640;
+        float dipW = pixelW / dpiScale;
+        float dipH = pixelH / dpiScale;
+
+        var bpTarget = new Vortice.Direct2D1.BitmapProperties1(
+            new Vortice.DCommon.PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied),
+            dpi, dpi, Vortice.Direct2D1.BitmapOptions.Target | Vortice.Direct2D1.BitmapOptions.CannotDraw);
+
+        var bpRead = new Vortice.Direct2D1.BitmapProperties1(
+            new Vortice.DCommon.PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied),
+            dpi, dpi, Vortice.Direct2D1.BitmapOptions.CpuRead | Vortice.Direct2D1.BitmapOptions.CannotDraw);
+
+        int srcW = 800;
+        int srcH = 1200;
+        var bpSrc = new Vortice.Direct2D1.BitmapProperties1(
+            new Vortice.DCommon.PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied),
+            96f, 96f, Vortice.Direct2D1.BitmapOptions.None);
+
+        var px = new byte[srcW * srcH * 4];
+        for (int i = 0; i < px.Length; i += 4)
+        {
+            px[i] = 100;     // B
+            px[i + 1] = 200; // G
+            px[i + 2] = 50;  // R
+            px[i + 3] = 255; // A
+        }
+
+        unsafe
+        {
+            fixed (byte* p = px)
+            {
+                using var bmp = dc.CreateBitmap(new Vortice.Mathematics.SizeI(srcW, srcH), (IntPtr)p, (uint)(srcW * 4), bpSrc);
+
+                float fitDipScale = MathF.Min(dipW / srcW, dipH / srcH);
+                float drawW = srcW * fitDipScale;
+                float drawH = srcH * fitDipScale;
+                float left = (dipW - drawW) * 0.5f;
+                float top = (dipH - drawH) * 0.5f;
+                var dest = new Vortice.RawRectF(left, top, left + drawW, top + drawH);
+
+                // 1. DrawBitmap
+                using var target1 = dc.CreateBitmap(new Vortice.Mathematics.SizeI(pixelW, pixelH), IntPtr.Zero, 0, bpTarget);
+                dc.Target = target1;
+                dc.BeginDraw();
+                dc.Clear(new Vortice.Mathematics.Color4(0, 0, 0, 1));
+                dc.DrawBitmap(bmp, dest, 1.0f, Vortice.Direct2D1.BitmapInterpolationMode.Linear, null);
+                dc.EndDraw();
+
+                using var read1 = dc.CreateBitmap(new Vortice.Mathematics.SizeI(pixelW, pixelH), IntPtr.Zero, 0, bpRead);
+                read1.CopyFromBitmap(target1);
+                var box1 = MeasureDrawnBox(read1, pixelW, pixelH);
+
+                // 2. DrawImage with dpiScale-aware scaleX/scaleY
+                using var cm = new Vortice.Direct2D1.Effects.ColorManagement(dc);
+                cm.SetInput(0, bmp, true);
+                using var srgb = dc.CreateColorContext(Vortice.Direct2D1.ColorSpace.Srgb, null, 0);
+                using var scRgb = dc.CreateColorContext(Vortice.Direct2D1.ColorSpace.ScRgb, null, 0);
+                cm.SourceColorContext = srgb;
+                cm.DestinationColorContext = scRgb;
+                cm.AlphaMode = Vortice.Direct2D1.ColorManagementAlphaMode.Premultiplied;
+
+                using var target2 = dc.CreateBitmap(new Vortice.Mathematics.SizeI(pixelW, pixelH), IntPtr.Zero, 0, bpTarget);
+                dc.Target = target2;
+                dc.BeginDraw();
+                dc.Clear(new Vortice.Mathematics.Color4(0, 0, 0, 1));
+
+                float scaleX = (drawW * dpiScale) / srcW;
+                float scaleY = (drawH * dpiScale) / srcH;
+                dc.Transform = System.Numerics.Matrix3x2.CreateScale(scaleX, scaleY) * System.Numerics.Matrix3x2.CreateTranslation(dest.Left, dest.Top);
+                dc.DrawImage(cm, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, Vortice.Direct2D1.CompositeMode.SourceOver);
+                dc.Transform = System.Numerics.Matrix3x2.Identity;
+                dc.EndDraw();
+
+                using var read2 = dc.CreateBitmap(new Vortice.Mathematics.SizeI(pixelW, pixelH), IntPtr.Zero, 0, bpRead);
+                read2.CopyFromBitmap(target2);
+                var box2 = MeasureDrawnBox(read2, pixelW, pixelH);
+
+                Assert.True(Math.Abs(box1.L - box2.L) <= 1, $"L: {box1.L} vs {box2.L}");
+                Assert.True(Math.Abs(box1.T - box2.T) <= 1, $"T: {box1.T} vs {box2.T}");
+                Assert.True(Math.Abs(box1.R - box2.R) <= 1, $"R: {box1.R} vs {box2.R}");
+                Assert.True(Math.Abs(box1.B - box2.B) <= 1, $"B: {box1.B} vs {box2.B}");
+            }
+        }
+    }
+
+    private static unsafe (int L, int T, int R, int B) MeasureDrawnBox(Vortice.Direct2D1.ID2D1Bitmap1 bmp, int w, int h)
+    {
+        var map = bmp.Map(Vortice.Direct2D1.MapOptions.Read);
+        byte* p = (byte*)map.Bits;
+        int pitch = (int)map.Pitch;
+        int minX = -1, maxX = -1, minY = -1, maxY = -1;
+        for (int y = 0; y < h; y++)
+        {
+            for (int x = 0; x < w; x++)
+            {
+                if (p[y * pitch + x * 4 + 1] > 50) // Green
+                {
+                    if (minY == -1) minY = y;
+                    maxY = y;
+                    if (minX == -1 || x < minX) minX = x;
+                    if (maxX == -1 || x > maxX) maxX = x;
+                }
+            }
+        }
+        bmp.Unmap();
+        return (minX, minY, maxX, maxY);
+    }
+
     private static byte[] CreateTestJpegBytes(int width, int height)
     {
         using var wic = new IWICImagingFactory2();

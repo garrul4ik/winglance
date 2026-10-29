@@ -642,8 +642,9 @@ public sealed class D2DRenderEngine : IDisposable
         var dest = ComputePhotoDestDipRect(slot.Source, paneDip, state, out float physScale);
         float destW = dest.Right - dest.Left;
         float destH = dest.Bottom - dest.Top;
+        float dpiScale = DpiScale;
 
-        bool needsColorManagement = slot.ColorManagedEffect != null && (slot.CustomColorContext != null || _isFp16SwapChain);
+        bool needsColorManagement = slot.ColorManagedEffect != null && slot.CustomColorContext != null;
         // Direct DrawBitmap bypasses D2D intermediate effect tiling limits (>4096) and provides maximum hardware throughput for sRGB
         bool useDirectBitmap = !needsColorManagement || slot.Source.Width > 4096 || slot.Source.Height > 4096;
 
@@ -656,8 +657,8 @@ public sealed class D2DRenderEngine : IDisposable
         }
         else
         {
-            float scaleX = destW / slot.Source.Width;
-            float scaleY = destH / slot.Source.Height;
+            float scaleX = (destW * dpiScale) / slot.Source.Width;
+            float scaleY = (destH * dpiScale) / slot.Source.Height;
 
             var interp = physScale >= 1.95f
                 ? D2DInterpolationMode.NearestNeighbor
@@ -672,8 +673,8 @@ public sealed class D2DRenderEngine : IDisposable
         // GPU Focus Peaking (Shift + F)
         if (state.ShowFocusPeaking && slot.PeakingMatrixEffect != null)
         {
-            float scaleX = destW / slot.Source.Width;
-            float scaleY = destH / slot.Source.Height;
+            float scaleX = (destW * dpiScale) / slot.Source.Width;
+            float scaleY = (destH * dpiScale) / slot.Source.Height;
             var imgTransform = Matrix3x2.CreateScale(scaleX, scaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
             _dc.Transform = imgTransform;
             _dc.DrawImage(slot.PeakingMatrixEffect, D2DInterpolationMode.Linear, CompositeMode.SourceOver);
@@ -681,17 +682,18 @@ public sealed class D2DRenderEngine : IDisposable
         }
 
         // Exposure Clipping Blinkies (O) on primary pane
-        if (isPrimaryPane && state.ShowClipping && _clippingBitmap != null && _clippingSource != null)
+        if (isPrimaryPane && state.ShowClipping && _clippingBitmap != null)
         {
-            float mScaleX = destW / _clippingSource.Width;
-            float mScaleY = destH / _clippingSource.Height;
-            _dc.Transform = Matrix3x2.CreateScale(mScaleX, mScaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
+            var interpMode = physScale >= 1.95f
+                ? BitmapInterpolationMode.NearestNeighbor
+                : BitmapInterpolationMode.Linear;
             _dc.DrawBitmap(
                 _clippingBitmap,
+                dest,
                 state.ClippingPulseAlpha,
-                physScale >= 1.95f ? BitmapInterpolationMode.NearestNeighbor : BitmapInterpolationMode.Linear
+                interpMode,
+                null
             );
-            _dc.Transform = Matrix3x2.Identity;
         }
 
         // AI Auto Eye Reticle (Shift + Z)
@@ -993,11 +995,12 @@ public sealed class D2DRenderEngine : IDisposable
     {
         if (_dc == null || _fontToast == null) return;
 
-        float w = Math.Clamp(MeasureWidth(text, _fontToast) + 48f, 140f, dipW - 80f);
-        const float h = 52f;
-        var card = MakeRounded((dipW - w) * 0.5f, (dipH - h) * 0.5f, w, h, 16f);
+        float w = Math.Clamp(MeasureWidth(text, _fontToast) + 40f, 130f, dipW - 60f);
+        const float h = 44f;
+        float topY = Math.Min(62f, dipH * 0.15f);
+        var card = MakeRounded((dipW - w) * 0.5f, topY, w, h, 14f);
 
-        BeginFrostedCard(card, opacity, darkTintAlpha: 0.72f);
+        BeginFrostedCard(card, opacity, darkTintAlpha: 0.76f);
         using (var brush = _dc.CreateSolidColorBrush(UiColor(255, 255, 255, 0.98f)))
         {
             _dc.DrawText(text, _fontToast, new Rect(card.Rect.Left + 12f, card.Rect.Top, w - 24f, h), brush);
@@ -1073,8 +1076,8 @@ public sealed class D2DRenderEngine : IDisposable
 
         (string Key, string Desc)[] rightCol =
         {
-            ("Z", "100% 1:1 Sensor Zoom (16-bit RAW)"),
-            ("Shift + Z", "AI Auto Face & Eye Jump (DirectML)"),
+            ("Z / R-Click", "100% 1:1 Sensor Zoom (16-bit RAW)"),
+            ("Shift+Z / M-Click", "AI Auto Face & Eye Jump (DirectML)"),
             ("Shift + F", "GPU Focus Peaking (Sobel Shader)"),
             ("O", "Exposure Clipping Blinkies"),
             ("H", "Live RGB + Rec.709 Histogram"),

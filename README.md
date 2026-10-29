@@ -38,7 +38,7 @@
 | Feature | Highlight |
 | :--- | :--- |
 | 🎮 **Direct3D 11.1 + Direct2D 1.3 HDR/WCG Engine** | DXGI 1.6 Flip-Model SwapChain with FP16 linear scRGB (`R16G16B16A16_FLOAT`). Direct2D hardware ICC color management for Display P3, Adobe RGB, and ProPhoto RGB. |
-| 👁️ **AI Auto Face & Eye Jump (`Shift + Z` / Double-Tap `Z`)** | Instant hardware-accelerated jump to the sharpest eye at 100%+ zoom. Cycles across multiple faces and eyes on repeat presses. |
+| 👁️ **AI Auto Face & Eye Jump (`Shift + Z` / Middle-Click / Double-Tap `Z`)** | Instant hardware-accelerated jump to the sharpest eye at 100%+ zoom. Cycles across multiple faces and eyes on repeat presses. |
 | 🎯 **GPU Focus Peaking (`Shift + F`)** | Real-time Sobel edge detection and neon emerald shader highlights in-focus eyelashes and textures at 120 FPS. |
 | 🔬 **Monolithic 16-Bit RAW Demosaicing (`Z`)** | Bundled `LibRaw` (1,182 cameras) provides zero-copy preview extraction and true 16-bit sensor demosaicing without any third-party codecs. |
 | 🔍 **100% 1:1 Sensor Zoom (`Z` / Click)** | Bounded HighQualityCubic scaling when fitting, instantly switching to crisp NearestNeighbor pixel grid when peeping $\ge 200\%$. |
@@ -71,8 +71,8 @@ Press **`?`** or **`F1`** at any time inside WinGlance to toggle the interactive
 ### 🔍 Review, Focus & AI Vision
 | Key | Action | Description |
 | :---: | :--- | :--- |
-| **`Z`** / **Click** | **100% 1:1 Sensor Zoom 🔍** | Zoom to 1:1 sensor pixels (upgrades RAW to 16-bit LibRaw demosaic) |
-| **`Shift + Z`** | **AI Auto Eye Jump 👁️** | Jump directly to the sharpest eye (DirectML GPU/NPU); repeat to cycle eyes |
+| **`Z`** / **Right-Click** | **100% 1:1 Sensor Zoom 🔍** | Zoom to 1:1 sensor pixels (upgrades RAW to 16-bit LibRaw demosaic) |
+| **`Shift + Z`** / **Mid-Click** | **AI Auto Eye Jump 👁️** | Jump directly to the sharpest eye (DirectML GPU/NPU); repeat to cycle eyes |
 | **`Shift + F`** | **GPU Focus Peaking 🎯** | Toggle real-time Sobel neon emerald in-focus overlay |
 | **`S`** / **`Tab`** | **2-Up Split Compare 👥** | Side-by-side comparison with synchronous zoom & pan (`Tab` swaps active pane) |
 
@@ -109,7 +109,7 @@ Press **`?`** or **`F1`** at any time inside WinGlance to toggle the interactive
 
 ### Option 1: Direct Download (Portable Standalone) 📦
 Download the pre-compiled standalone binary from the [**Releases Page**](https://github.com/garrul4ik/winglance/releases/latest):
-1. Download **`WinGlance-v1.2.0-Windows-x64.zip`** (or `WinGlance.exe`).
+1. Download **`WinGlance-v1.2.1-Windows-x64.zip`** (or `WinGlance.exe`).
 2. Run `WinGlance.exe` anywhere — completely portable, single file (9.6 MB), zero installer, zero dependencies.
 3. Drag any image or photo folder onto `WinGlance.exe` or set it as default in Windows Explorer!
 
