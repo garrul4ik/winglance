@@ -9,9 +9,10 @@ namespace WinGlance.Engine;
 
 public sealed class SlidePipeline
 {
-    private readonly ConcurrentDictionary<int, DecodedImage> _cache = new();
-    private readonly ConcurrentDictionary<int, Task<DecodedImage>> _inFlightTasks = new();
-    private readonly ConcurrentDictionary<int, DecodedImage> _fullResCache = new();
+    private readonly ConcurrentDictionary<string, DecodedImage> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Task<DecodedImage>> _inFlightTasks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DecodedImage> _fullResCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Task<DecodedImage>> _inFlightFullResTasks = new(StringComparer.OrdinalIgnoreCase);
 
     private IReadOnlyList<SlideItem> _items = Array.Empty<SlideItem>();
     private int _currentIndex;
@@ -31,6 +32,7 @@ public sealed class SlidePipeline
         _cache.Clear();
         _inFlightTasks.Clear();
         _fullResCache.Clear();
+        _inFlightFullResTasks.Clear();
 
         _items = items;
         _currentIndex = Math.Clamp(initialIndex, 0, Math.Max(0, items.Count - 1));
@@ -42,11 +44,41 @@ public sealed class SlidePipeline
         }
     }
 
+    /// <summary>
+    /// Updates the active playlist items and index while preserving cached ID-keyed decodes
+    /// that remain inside the preload window (prevents cache desync on delete/restore/watcher updates).
+    /// </summary>
+    public void UpdateItems(IReadOnlyList<SlideItem> items, int newCurrentIndex)
+    {
+        _items = items;
+        _currentIndex = Math.Clamp(newCurrentIndex, 0, Math.Max(0, items.Count - 1));
+
+        if (_items.Count == 0)
+        {
+            _preloadCts?.Cancel();
+            _cache.Clear();
+            _inFlightTasks.Clear();
+            _fullResCache.Clear();
+            _inFlightFullResTasks.Clear();
+            return;
+        }
+
+        PreloadWindow(_currentIndex, isForward: true);
+    }
+
     public void Invalidate(int index)
     {
-        _cache.TryRemove(index, out _);
-        _fullResCache.TryRemove(index, out _);
-        _inFlightTasks.TryRemove(index, out _);
+        if (index < 0 || index >= _items.Count) return;
+        Invalidate(_items[index].Id);
+    }
+
+    public void Invalidate(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return;
+        _cache.TryRemove(itemId, out _);
+        _fullResCache.TryRemove(itemId, out _);
+        _inFlightTasks.TryRemove(itemId, out _);
+        _inFlightFullResTasks.TryRemove(itemId, out _);
     }
 
     public void UpdateBoundingSize(int newSize)
@@ -61,7 +93,17 @@ public sealed class SlidePipeline
 
     public bool TryGetCachedScreenImage(int index, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out DecodedImage? image)
     {
-        return _cache.TryGetValue(index, out image);
+        if (index < 0 || index >= _items.Count)
+        {
+            image = null;
+            return false;
+        }
+        return _cache.TryGetValue(_items[index].Id, out image);
+    }
+
+    public bool TryGetCachedScreenImage(string itemId, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out DecodedImage? image)
+    {
+        return _cache.TryGetValue(itemId, out image);
     }
 
     public async Task<DecodedImage> GetImageAsync(int index, CancellationToken ct = default)
@@ -71,31 +113,30 @@ public sealed class SlidePipeline
             throw new ArgumentOutOfRangeException(nameof(index), $"Index {index} out of bounds.");
         }
 
-        if (_cache.TryGetValue(index, out var cached))
+        var item = _items[index];
+        if (_cache.TryGetValue(item.Id, out var cached))
         {
             return cached;
         }
 
-        if (_inFlightTasks.TryGetValue(index, out var existingTask))
+        if (_inFlightTasks.TryGetValue(item.Id, out var existingTask))
         {
             return await existingTask;
         }
 
-        var item = _items[index];
         var bounding = _maxPixelSize;
-
         var task = Task.Run(() => FastImageDecoder.Decode(item.Path, bounding), ct);
-        _inFlightTasks[index] = task;
+        _inFlightTasks[item.Id] = task;
 
         try
         {
             var decoded = await task;
-            _cache[index] = decoded;
+            _cache[item.Id] = decoded;
             return decoded;
         }
         finally
         {
-            _inFlightTasks.TryRemove(index, out _);
+            _inFlightTasks.TryRemove(item.Id, out _);
         }
     }
 
@@ -110,28 +151,49 @@ public sealed class SlidePipeline
 
         // Reuse screen-bounded image only if not downscaled AND not a RAW preview awaiting 16-bit sensor demosaic
         if (!item.IsStacked &&
-            _cache.TryGetValue(index, out var screenCached) &&
+            _cache.TryGetValue(item.Id, out var screenCached) &&
             !screenCached.IsDownscaled &&
             (!screenCached.IsRaw || screenCached.IsFullSensorRaw))
         {
             return screenCached;
         }
 
-        if (_fullResCache.TryGetValue(index, out var fullCached))
+        if (_fullResCache.TryGetValue(item.Id, out var fullCached))
         {
             return fullCached;
         }
 
-        var targetPath = item.RawPath ?? item.Path;
-        var decoded = await Task.Run(() => FastImageDecoder.Decode(targetPath, maxBoundingPixelSize: 0), ct);
-
-        if (_fullResCache.Count >= 2)
+        if (_inFlightFullResTasks.TryGetValue(item.Id, out var existingTask))
         {
-            _fullResCache.Clear();
+            return await existingTask;
         }
 
-        _fullResCache[index] = decoded;
-        return decoded;
+        var targetPath = item.RawPath ?? item.Path;
+        var task = Task.Run(() => FastImageDecoder.Decode(targetPath, maxBoundingPixelSize: 0), ct);
+        _inFlightFullResTasks[item.Id] = task;
+
+        try
+        {
+            var decoded = await task;
+            if (_fullResCache.Count >= 2)
+            {
+                foreach (var key in _fullResCache.Keys)
+                {
+                    if (!string.Equals(key, item.Id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _fullResCache.TryRemove(key, out _);
+                        break;
+                    }
+                }
+            }
+
+            _fullResCache[item.Id] = decoded;
+            return decoded;
+        }
+        finally
+        {
+            _inFlightFullResTasks.TryRemove(item.Id, out _);
+        }
     }
 
     public void NotifyCurrentIndexChanged(int newIndex, bool isForward)
@@ -150,17 +212,17 @@ public sealed class SlidePipeline
         _preloadCts = new CancellationTokenSource();
         var ct = _preloadCts.Token;
 
-        var indicesToKeep = new HashSet<int>();
-        var indicesToPreload = new List<int>();
+        var idsToKeep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var itemsToPreload = new List<(int Index, SlideItem Item)>();
 
         if (isForward)
         {
             for (int r = 1; r <= _cacheRadius; r++)
             {
                 var fwd = centerIndex + r;
-                if (fwd < _items.Count) indicesToPreload.Add(fwd);
+                if (fwd < _items.Count) itemsToPreload.Add((fwd, _items[fwd]));
                 var bwd = centerIndex - r;
-                if (bwd >= 0) indicesToPreload.Add(bwd);
+                if (bwd >= 0) itemsToPreload.Add((bwd, _items[bwd]));
             }
         }
         else
@@ -168,36 +230,74 @@ public sealed class SlidePipeline
             for (int r = 1; r <= _cacheRadius; r++)
             {
                 var bwd = centerIndex - r;
-                if (bwd >= 0) indicesToPreload.Add(bwd);
+                if (bwd >= 0) itemsToPreload.Add((bwd, _items[bwd]));
                 var fwd = centerIndex + r;
-                if (fwd < _items.Count) indicesToPreload.Add(fwd);
+                if (fwd < _items.Count) itemsToPreload.Add((fwd, _items[fwd]));
             }
         }
 
-        indicesToKeep.Add(centerIndex);
-        foreach (var idx in indicesToPreload) indicesToKeep.Add(idx);
+        if (centerIndex >= 0 && centerIndex < _items.Count)
+        {
+            idsToKeep.Add(_items[centerIndex].Id);
+        }
+        foreach (var entry in itemsToPreload)
+        {
+            idsToKeep.Add(entry.Item.Id);
+        }
 
         foreach (var key in _cache.Keys)
         {
-            if (!indicesToKeep.Contains(key))
+            if (!idsToKeep.Contains(key))
             {
                 _cache.TryRemove(key, out _);
             }
         }
 
+        foreach (var key in _fullResCache.Keys)
+        {
+            if (!idsToKeep.Contains(key))
+            {
+                _fullResCache.TryRemove(key, out _);
+            }
+        }
+
         _ = Task.Run(async () =>
         {
-            foreach (var idx in indicesToPreload)
+            foreach (var (idx, item) in itemsToPreload)
             {
                 if (ct.IsCancellationRequested) break;
-                if (_cache.ContainsKey(idx)) continue;
+                if (_cache.ContainsKey(item.Id)) continue;
 
                 try
                 {
-                    await GetImageAsync(idx, ct);
+                    await GetImageAsyncByItem(item, ct);
                 }
                 catch { }
             }
         }, ct);
+    }
+
+    private async Task GetImageAsyncByItem(SlideItem item, CancellationToken ct)
+    {
+        if (_cache.ContainsKey(item.Id)) return;
+        if (_inFlightTasks.TryGetValue(item.Id, out var existing))
+        {
+            await existing;
+            return;
+        }
+
+        var bounding = _maxPixelSize;
+        var task = Task.Run(() => FastImageDecoder.Decode(item.Path, bounding), ct);
+        _inFlightTasks[item.Id] = task;
+
+        try
+        {
+            var decoded = await task;
+            _cache[item.Id] = decoded;
+        }
+        finally
+        {
+            _inFlightTasks.TryRemove(item.Id, out _);
+        }
     }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Vortice;
 using Vortice.DCommon;
@@ -10,6 +11,7 @@ using Vortice.DirectWrite;
 using Vortice.DXGI;
 using Vortice.Mathematics;
 using WinGlance.Engine;
+using WinGlance.Gpu.Overlays;
 using WinGlance.Model;
 using WinGlance.Vision;
 using AlphaMode = Vortice.DCommon.AlphaMode;
@@ -20,6 +22,16 @@ using FeatureLevel = Vortice.Direct3D.FeatureLevel;
 using PixelFormat = Vortice.DCommon.PixelFormat;
 
 namespace WinGlance.Gpu;
+
+public sealed class MultiUpSlotState
+{
+    public SlideItem? Item { get; set; }
+    public int FilteredIndex { get; set; } = -1;
+    public CullingMetadata Culling { get; set; }
+    public AestheticScoreResult? Aesthetic { get; set; }
+    public BurstBreadcrumbInfo? BurstInfo { get; set; }
+    public bool IsHero => BurstInfo?.IsCurrentHero == true;
+}
 
 public sealed class RenderHudState
 {
@@ -32,22 +44,65 @@ public sealed class RenderHudState
     public int SecondaryIndex { get; set; }
     public CullingMetadata SecondaryCulling { get; set; }
 
+    public ThemeMode Theme { get; set; } = ThemeMode.Dark;
     public CullingFilter ActiveFilter { get; set; } = CullingFilter.All;
-    public bool IsSplitCompare { get; set; }
+    public bool AutoAdvanceEnabled { get; set; } = true;
+
+    public MultiUpMode MultiUpMode { get; set; } = MultiUpMode.Single;
+    public bool IsSplitCompare
+    {
+        get => MultiUpMode != MultiUpMode.Single;
+        set => MultiUpMode = value ? MultiUpMode.TwoUp : MultiUpMode.Single;
+    }
+    public int ActiveMultiUpSlot { get; set; }
+    public bool IsSoloLoupeActive { get; set; }
+    public MultiUpSlotState[] MultiUpSlots { get; } = { new(), new(), new(), new() };
+
     public bool IsSlideshowPlaying { get; set; }
     public int SlideshowSeconds { get; set; } = 3;
     public bool ShowHistogram { get; set; }
     public HistogramData? Histogram { get; set; }
+    public HistogramData? SecondaryHistogram { get; set; }
     public bool ShowClipping { get; set; }
     public float ClippingPulseAlpha { get; set; } = 0.85f;
+    public bool ShowFalseColor { get; set; }
     public bool ShowFocusPeaking { get; set; }
+    public bool ShowExifDossier { get; set; }
+    public float ExifHoverProgress { get; set; }
     public bool ShowCheatsheet { get; set; }
+    public bool IsCheatsheetExpanded { get; set; }
     public bool IsLoadingFullRaw { get; set; }
 
-    // Pan & Zoom state (shared across split panes)
+    public AestheticScoreResult? PrimaryAesthetic { get; set; }
+    public BurstBreadcrumbInfo? PrimaryBurstInfo { get; set; }
+
+    // Camera Profile / Film Simulation (1-UP Fuji/Nikon/Sony RAW)
+    public CameraProfile ActiveCameraProfile { get; set; } = CameraProfile.AsShot;
+    public CameraBrand ActiveCameraBrand { get; set; } = CameraBrand.Unsupported;
+
+    // Face Verification Dock (A)
+    public bool ShowFaceDock { get; set; } = true;
+    public IReadOnlyList<FaceCropTile> FaceTiles { get; set; } = Array.Empty<FaceCropTile>();
+    public int? ActiveZoomedFaceIndex { get; set; }
+    public int HoveredFaceTileIndex { get; set; } = -1;
+
+    // Filmstrip Scrubber (G)
+    public float FilmstripOpacity { get; set; }
+    public bool IsFilmstripPinned { get; set; }
+    public float FilmstripScrollX { get; set; }
+    public IReadOnlyList<SlideItem> PlaylistItems { get; set; } = Array.Empty<SlideItem>();
+    public Func<string, CullingMetadata>? GetCullingForItem { get; set; }
+    public Func<int, BurstBreadcrumbInfo?>? GetBurstForIndex { get; set; }
+    public int HoveredFilmstripIndex { get; set; } = -1;
+
+    // Pan, Zoom & Loupe state
     public bool IsCustomZoom { get; set; }
     public float PixelZoomScale { get; set; } = 1.0f; // 1.0 = exact 1:1 physical sensor pixel
     public Vector2 PanNormCenter { get; set; } = new(0.5f, 0.5f);
+    public bool IsMiniMapCollapsed { get; set; }
+    public int CursorLoupeMagnification { get; set; } // 0, 2, 4
+    public Vector2 CursorDip { get; set; }
+    public bool IsCursorInsideClient { get; set; }
 
     // Animated HUD & AI Eye Reticle
     public float HudOpacity { get; set; } = 1.0f;
@@ -56,32 +111,51 @@ public sealed class RenderHudState
     public NormalizedPoint? EyeReticlePoint { get; set; }
     public NormalizedRect? EyeFaceRect { get; set; }
     public float EyeReticleOpacity { get; set; }
+    public int EyeReticleSlot { get; set; }
 }
 
 public sealed class D2DRenderEngine : IDisposable
 {
+    private const int MaxMicroThumbGpuEntries = 160;
+
     private sealed class GpuPhotoSlot : IDisposable
     {
         public DecodedImage? Source;
         public ID2D1Bitmap1? Bitmap;
         public ID2D1ColorContext? CustomColorContext;
         public ColorManagement? ColorManagedEffect;
+        public ColorMatrix? ProfileMatrixEffect;
+        public CameraProfile ActiveProfile = CameraProfile.AsShot;
+        public CameraBrand ActiveBrand = CameraBrand.Unsupported;
         public EdgeDetection? EdgeEffect;
         public ColorMatrix? PeakingMatrixEffect;
+        public DecodedImage? FalseColorSource;
+        public ID2D1Bitmap1? FalseColorBitmap;
+        public DecodedImage? ClippingSource;
+        public ID2D1Bitmap1? ClippingBitmap;
 
         public void Dispose()
         {
             PeakingMatrixEffect?.Dispose();
             EdgeEffect?.Dispose();
+            ProfileMatrixEffect?.Dispose();
             ColorManagedEffect?.Dispose();
             CustomColorContext?.Dispose();
             Bitmap?.Dispose();
+            FalseColorBitmap?.Dispose();
+            ClippingBitmap?.Dispose();
+
             PeakingMatrixEffect = null;
             EdgeEffect = null;
+            ProfileMatrixEffect = null;
             ColorManagedEffect = null;
             CustomColorContext = null;
             Bitmap = null;
             Source = null;
+            FalseColorBitmap = null;
+            FalseColorSource = null;
+            ClippingBitmap = null;
+            ClippingSource = null;
         }
     }
 
@@ -105,18 +179,31 @@ public sealed class D2DRenderEngine : IDisposable
     private ID2D1ColorContext? _srgbColorContext;
     private ID2D1ColorContext? _scRgbColorContext;
 
-    private readonly GpuPhotoSlot _primarySlot = new();
-    private readonly GpuPhotoSlot _secondarySlot = new();
-    private DecodedImage? _clippingSource;
-    private ID2D1Bitmap1? _clippingBitmap;
+    private readonly GpuPhotoSlot[] _slots = { new(), new(), new(), new() };
 
-    // Typography formats
-    private IDWriteTextFormat? _fontHero;
-    private IDWriteTextFormat? _fontToast;
-    private IDWriteTextFormat? _fontUiBold;
-    private IDWriteTextFormat? _fontUiRegular;
-    private IDWriteTextFormat? _fontMonoSmall;
-    private IDWriteTextFormat? _fontCheatHeader;
+    private IReadOnlyList<FaceCropTile> _faceTilesSource = Array.Empty<FaceCropTile>();
+    private readonly List<ID2D1Bitmap1?> _faceCropBitmaps = new();
+
+    private MicroThumbnailEngine? _microThumbEngine;
+    private readonly Dictionary<string, (ID2D1Bitmap1 Bitmap, LinkedListNode<string> Node)> _microThumbGpuCache =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly LinkedList<string> _microThumbGpuLru = new();
+
+    private TypographySet? _fonts;
+
+    private readonly WelcomeOverlay _welcomeOverlay = new();
+    private readonly SplitPaneBadgeOverlay _splitPaneBadgeOverlay = new();
+    private readonly TopHudOverlay _topHudOverlay = new();
+    private readonly BottomHudOverlay _bottomHudOverlay = new();
+    private readonly FilmstripOverlay _filmstripOverlay = new();
+    private readonly FaceDockOverlay _faceDockOverlay = new();
+    private readonly HistogramOverlay _histogramOverlay = new();
+    private readonly FalseColorLegendOverlay _falseColorLegendOverlay = new();
+    private readonly ExifDossierOverlay _exifDossierOverlay = new();
+    private readonly NavigatorMiniMapOverlay _miniMapOverlay = new();
+    private readonly CursorLoupeOverlay _cursorLoupeOverlay = new();
+    private readonly ToastOverlay _toastOverlay = new();
+    private readonly CheatsheetOverlay _cheatsheetOverlay = new();
 
     public bool IsHdrFp16Active => _isFp16SwapChain;
     public float DpiScale => _dpi / 96.0f;
@@ -134,6 +221,8 @@ public sealed class D2DRenderEngine : IDisposable
         CreateTypography();
         CreateWindowSizeResources();
     }
+
+    public void SetMicroThumbnailEngine(MicroThumbnailEngine? engine) => _microThumbEngine = engine;
 
     private void CreateDeviceResources()
     {
@@ -173,34 +262,8 @@ public sealed class D2DRenderEngine : IDisposable
     private void CreateTypography()
     {
         _dwrite ??= DWrite.DWriteCreateFactory<IDWriteFactory>();
-
-        _fontHero?.Dispose();
-        _fontToast?.Dispose();
-        _fontUiBold?.Dispose();
-        _fontUiRegular?.Dispose();
-        _fontMonoSmall?.Dispose();
-        _fontCheatHeader?.Dispose();
-
-        _fontHero = _dwrite.CreateTextFormat("Segoe UI Variable Display", FontWeight.SemiBold, FontStyle.Normal, 28.0f);
-        _fontHero.TextAlignment = TextAlignment.Center;
-
-        _fontToast = _dwrite.CreateTextFormat("Segoe UI Variable Display", FontWeight.SemiBold, FontStyle.Normal, 20.0f);
-        _fontToast.TextAlignment = TextAlignment.Center;
-        _fontToast.ParagraphAlignment = ParagraphAlignment.Center;
-
-        _fontUiBold = _dwrite.CreateTextFormat("Segoe UI Variable Text", FontWeight.SemiBold, FontStyle.Normal, 13.0f);
-        _fontUiBold.ParagraphAlignment = ParagraphAlignment.Center;
-        _fontUiBold.WordWrapping = WordWrapping.NoWrap;
-
-        _fontUiRegular = _dwrite.CreateTextFormat("Segoe UI Variable Text", FontWeight.Normal, FontStyle.Normal, 12.0f);
-        _fontUiRegular.ParagraphAlignment = ParagraphAlignment.Center;
-        _fontUiRegular.WordWrapping = WordWrapping.NoWrap;
-
-        _fontMonoSmall = _dwrite.CreateTextFormat("Cascadia Mono", FontWeight.SemiBold, FontStyle.Normal, 11.0f);
-        _fontMonoSmall.ParagraphAlignment = ParagraphAlignment.Center;
-        _fontMonoSmall.WordWrapping = WordWrapping.NoWrap;
-
-        _fontCheatHeader = _dwrite.CreateTextFormat("Segoe UI Variable Display", FontWeight.Bold, FontStyle.Normal, 15.0f);
+        _fonts?.Dispose();
+        _fonts = new TypographySet(_dwrite);
     }
 
     private void CreateWindowSizeResources()
@@ -220,7 +283,6 @@ public sealed class D2DRenderEngine : IDisposable
             using var adapter = dxgiDevice.GetAdapter();
             using var dxgiFactory = adapter.GetParent<IDXGIFactory2>();
 
-            // Prefer 16-bit floating-point linear scRGB Flip-Model SwapChain (Wide Color Gamut & HDR/EDR)
             var fp16Desc = new SwapChainDescription1
             {
                 Width = (uint)_pixelWidth,
@@ -299,34 +361,130 @@ public sealed class D2DRenderEngine : IDisposable
         CreateWindowSizeResources();
     }
 
-    public void SetPrimaryImage(DecodedImage? image)
+    public void SetPrimaryImage(DecodedImage? image) => SetSlotImage(0, image);
+    public void SetSecondaryImage(DecodedImage? image) => SetSlotImage(1, image);
+    public void SetClippingMask(DecodedImage? mask) => SetSlotClippingMask(0, mask);
+    public void SetPrimaryFalseColor(DecodedImage? fcImage) => SetSlotFalseColor(0, fcImage);
+    public void SetSecondaryFalseColor(DecodedImage? fcImage) => SetSlotFalseColor(1, fcImage);
+
+    public void SetSlotImage(int slotIndex, DecodedImage? image)
     {
-        if (ReferenceEquals(_primarySlot.Source, image)) return;
-        UploadToSlot(_primarySlot, image);
+        if ((uint)slotIndex >= (uint)_slots.Length) return;
+        var slot = _slots[slotIndex];
+        if (ReferenceEquals(slot.Source, image)) return;
+        slot.ActiveProfile = CameraProfile.AsShot;
+        slot.ActiveBrand = CameraBrand.Unsupported;
+        UploadToSlot(slot, image);
     }
 
-    public void SetSecondaryImage(DecodedImage? image)
+    public void SetSlotCameraProfile(int slotIndex, CameraProfile profile, CameraBrand brand)
     {
-        if (ReferenceEquals(_secondarySlot.Source, image)) return;
-        UploadToSlot(_secondarySlot, image);
+        if ((uint)slotIndex >= (uint)_slots.Length) return;
+        var slot = _slots[slotIndex];
+        slot.ActiveProfile = profile;
+        slot.ActiveBrand = brand;
+        if (slot.ProfileMatrixEffect != null)
+        {
+            slot.ProfileMatrixEffect.Matrix = CameraProfileEngine.ComputeColorMatrix(profile, brand);
+        }
     }
 
-    public void SetClippingMask(DecodedImage? mask)
+    public void SetSlotClippingMask(int slotIndex, DecodedImage? mask)
     {
-        if (ReferenceEquals(_clippingSource, mask)) return;
-        _clippingBitmap?.Dispose();
-        _clippingBitmap = null;
-        _clippingSource = mask;
+        if ((uint)slotIndex >= (uint)_slots.Length) return;
+        var slot = _slots[slotIndex];
+        if (ReferenceEquals(slot.ClippingSource, mask)) return;
+        slot.ClippingBitmap?.Dispose();
+        slot.ClippingBitmap = null;
+        slot.ClippingSource = mask;
 
         if (mask != null && _dc != null)
         {
-            _clippingBitmap = UploadBitmap8BitPremultiplied(_dc, mask);
+            slot.ClippingBitmap = UploadBitmap8BitPremultiplied(_dc, mask);
         }
+    }
+
+    public void SetSlotFalseColor(int slotIndex, DecodedImage? fcImage)
+    {
+        if ((uint)slotIndex >= (uint)_slots.Length) return;
+        var slot = _slots[slotIndex];
+        if (ReferenceEquals(slot.FalseColorSource, fcImage)) return;
+        slot.FalseColorBitmap?.Dispose();
+        slot.FalseColorBitmap = null;
+        slot.FalseColorSource = fcImage;
+
+        if (fcImage != null && _dc != null)
+        {
+            slot.FalseColorBitmap = UploadBitmap8BitPremultiplied(_dc, fcImage);
+        }
+    }
+
+    public void SetFaceCropImages(IReadOnlyList<FaceCropTile> tiles)
+    {
+        if (ReferenceEquals(_faceTilesSource, tiles)) return;
+        DisposeFaceCropBitmaps();
+        _faceTilesSource = tiles;
+
+        if (_dc == null || tiles.Count == 0) return;
+        foreach (var tile in tiles)
+        {
+            _faceCropBitmaps.Add(UploadBitmap8BitPremultiplied(_dc, tile.CropImage));
+        }
+    }
+
+    public void ClearMicroThumbGpuCache()
+    {
+        foreach (var kv in _microThumbGpuCache.Values)
+        {
+            kv.Bitmap.Dispose();
+        }
+        _microThumbGpuCache.Clear();
+        _microThumbGpuLru.Clear();
+    }
+
+    private ID2D1Bitmap1? ResolveMicroThumbBitmap(string itemId)
+    {
+        if (_dc == null || string.IsNullOrEmpty(itemId)) return null;
+
+        if (_microThumbGpuCache.TryGetValue(itemId, out var existing))
+        {
+            _microThumbGpuLru.Remove(existing.Node);
+            _microThumbGpuLru.AddFirst(existing.Node);
+            return existing.Bitmap;
+        }
+
+        if (_microThumbEngine == null || !_microThumbEngine.TryGetThumbnail(itemId, out var thumb) || thumb == null)
+            return null;
+
+        ID2D1Bitmap1 bmp = thumb.PixelFormat == ImagePixelFormat.Rgba64
+            ? Convert16To8AndUpload(_dc, thumb)
+            : UploadBitmap8BitPremultiplied(_dc, thumb);
+
+        if (_microThumbGpuCache.Count >= MaxMicroThumbGpuEntries && _microThumbGpuLru.Last is { } oldest)
+        {
+            if (_microThumbGpuCache.TryGetValue(oldest.Value, out var victim))
+            {
+                victim.Bitmap.Dispose();
+                _microThumbGpuCache.Remove(oldest.Value);
+            }
+            _microThumbGpuLru.RemoveLast();
+        }
+
+        var node = _microThumbGpuLru.AddFirst(itemId);
+        _microThumbGpuCache[itemId] = (bmp, node);
+        return bmp;
     }
 
     private unsafe void UploadToSlot(GpuPhotoSlot slot, DecodedImage? image)
     {
+        var savedClip = slot.ClippingSource;
+        var savedFc = slot.FalseColorSource;
+        var savedProfile = slot.ActiveProfile;
+        var savedBrand = slot.ActiveBrand;
         slot.Dispose();
+        slot.ActiveProfile = savedProfile;
+        slot.ActiveBrand = savedBrand;
+
         if (image == null || _dc == null) return;
 
         slot.Source = image;
@@ -382,6 +540,19 @@ public sealed class D2DRenderEngine : IDisposable
         cm.AlphaMode = ColorManagementAlphaMode.Premultiplied;
         slot.ColorManagedEffect = cm;
 
+        // Hardware Camera Profile / Film Simulation ColorMatrix shader
+        bool canUseColorMgmt = slot.CustomColorContext != null && image.Width <= 4096 && image.Height <= 4096;
+        var profMat = new ColorMatrix(_dc)
+        {
+            AlphaMode = ColorMatrixAlphaMode.Premultiplied,
+            Matrix = CameraProfileEngine.ComputeColorMatrix(slot.ActiveProfile, slot.ActiveBrand)
+        };
+        if (canUseColorMgmt)
+            profMat.SetInputEffect(0, cm);
+        else
+            profMat.SetInput(0, slot.Bitmap, true);
+        slot.ProfileMatrixEffect = profMat;
+
         // GPU Focus Peaking Sobel + Neon Emerald shader graph
         var edge = new EdgeDetection(_dc)
         {
@@ -398,7 +569,6 @@ public sealed class D2DRenderEngine : IDisposable
         {
             AlphaMode = ColorMatrixAlphaMode.Premultiplied,
             Matrix = new Matrix5x4(
-                // Map edge intensity into crisp neon emerald-cyan highlights with noise-floor threshold (-0.22)
                 0.0f, 0.95f * peakScale, 0.45f * peakScale, 1.1f,
                 0.0f, 1.25f * peakScale, 0.60f * peakScale, 1.4f,
                 0.0f, 0.55f * peakScale, 0.30f * peakScale, 0.7f,
@@ -410,6 +580,17 @@ public sealed class D2DRenderEngine : IDisposable
 
         slot.EdgeEffect = edge;
         slot.PeakingMatrixEffect = matrix;
+
+        if (savedClip != null)
+        {
+            slot.ClippingSource = savedClip;
+            slot.ClippingBitmap = UploadBitmap8BitPremultiplied(_dc, savedClip);
+        }
+        if (savedFc != null)
+        {
+            slot.FalseColorSource = savedFc;
+            slot.FalseColorBitmap = UploadBitmap8BitPremultiplied(_dc, savedFc);
+        }
     }
 
     private static unsafe ID2D1Bitmap1 UploadBitmap8BitPremultiplied(ID2D1DeviceContext5 dc, DecodedImage img)
@@ -421,7 +602,6 @@ public sealed class D2DRenderEngine : IDisposable
             BitmapOptions.None
         );
 
-        // Quick scan to check if any alpha < 255 requires premultiplication
         bool needsPremul = false;
         fixed (byte* p = img.Pixels)
         {
@@ -527,101 +707,155 @@ public sealed class D2DRenderEngine : IDisposable
         float imgLeft = paneCenterX - normX * drawW;
         float imgTop = paneCenterY - normY * drawH;
 
-        if (drawW > paneW)
-        {
-            imgLeft = Math.Clamp(imgLeft, paneDip.Right - drawW, paneDip.Left);
-        }
-        else
-        {
-            imgLeft = paneCenterX - drawW * 0.5f;
-        }
+        imgLeft = drawW > paneW
+            ? Math.Clamp(imgLeft, paneDip.Right - drawW, paneDip.Left)
+            : paneCenterX - drawW * 0.5f;
 
-        if (drawH > paneH)
-        {
-            imgTop = Math.Clamp(imgTop, paneDip.Bottom - drawH, paneDip.Top);
-        }
-        else
-        {
-            imgTop = paneCenterY - drawH * 0.5f;
-        }
+        imgTop = drawH > paneH
+            ? Math.Clamp(imgTop, paneDip.Bottom - drawH, paneDip.Top)
+            : paneCenterY - drawH * 0.5f;
 
         return new RawRectF(imgLeft, imgTop, imgLeft + drawW, imgTop + drawH);
     }
 
     public void Render(RenderHudState state)
     {
-        if (_dc == null || _swapChain == null || _backBufferBitmap == null || _sceneBitmap == null) return;
+        if (_dc == null || _swapChain == null || _backBufferBitmap == null || _sceneBitmap == null ||
+            _d2dFactory == null || _dwrite == null || _hudBlurEffect == null || _fonts == null)
+        {
+            return;
+        }
 
         float dipW = DipWidth;
         float dipH = DipHeight;
+        var theme = GlassTheme.ForMode(state.Theme);
+
+        var paneRects = BottomLayoutMetrics.ComputeMultiUpPaneRects(state.MultiUpMode, dipW, dipH, state.IsSoloLoupeActive);
+        var slotDests = new RawRectF[_slots.Length];
+        var slotBitmaps = new ID2D1Bitmap1?[_slots.Length];
+        var slotImages = new DecodedImage?[_slots.Length];
+        for (int i = 0; i < _slots.Length; i++)
+        {
+            slotBitmaps[i] = _slots[i].Bitmap;
+            slotImages[i] = _slots[i].Source;
+        }
 
         _dc.BeginDraw();
 
-        // =========================================================================
-        // PASS 1: Render Obsidian Canvas + Color-Managed Photos + Shaders into _sceneBitmap
-        // =========================================================================
+        // PASS 1: Render Canvas + Color-Managed Photos + Camera Profiles + Shaders into _sceneBitmap
         _dc.Target = _sceneBitmap;
         _dc.Transform = Matrix3x2.Identity;
-        _dc.Clear(UiColor(0x0A, 0x0A, 0x0C));
+        _dc.Clear(theme.CanvasBackground.ToColor4(_isFp16SwapChain));
 
-        if (state.HasPlaylist && _primarySlot.Source != null && _primarySlot.Bitmap != null)
+        if (state.HasPlaylist)
         {
-            if (state.IsSplitCompare && _secondarySlot.Source != null && _secondarySlot.Bitmap != null)
+            if (state.IsSoloLoupeActive)
             {
-                float halfW = dipW * 0.5f;
-                var leftPane = new RawRectF(0, 0, halfW - 1f, dipH);
-                var rightPane = new RawRectF(halfW + 1f, 0, dipW, dipH);
-
-                DrawPhotoInPane(_primarySlot, leftPane, state, isPrimaryPane: true);
-                DrawPhotoInPane(_secondarySlot, rightPane, state, isPrimaryPane: false);
-
-                using var divBrush = _dc.CreateSolidColorBrush(UiColor(255, 255, 255, 0.22f));
-                _dc.DrawLine(new Vector2(halfW, 0), new Vector2(halfW, dipH), divBrush, 1.5f);
+                int soloIdx = Math.Clamp(state.ActiveMultiUpSlot, 0, _slots.Length - 1);
+                if (_slots[soloIdx].Source != null && _slots[soloIdx].Bitmap != null)
+                {
+                    slotDests[soloIdx] = DrawPhotoInPane(_slots[soloIdx], paneRects[0], state, soloIdx, roundedCell: false);
+                }
+            }
+            else if (state.MultiUpMode == MultiUpMode.Single)
+            {
+                if (_slots[0].Source != null && _slots[0].Bitmap != null)
+                {
+                    slotDests[0] = DrawPhotoInPane(_slots[0], paneRects[0], state, 0, roundedCell: false);
+                }
             }
             else
             {
-                var fullPane = new RawRectF(0, 0, dipW, dipH);
-                DrawPhotoInPane(_primarySlot, fullPane, state, isPrimaryPane: true);
+                int visibleCount = Math.Min((int)state.MultiUpMode, paneRects.Length);
+                for (int s = 0; s < visibleCount; s++)
+                {
+                    var pane = paneRects[s];
+                    if (_slots[s].Source != null && _slots[s].Bitmap != null)
+                    {
+                        slotDests[s] = DrawPhotoInPane(_slots[s], pane, state, s, roundedCell: true);
+                    }
+
+                    // Multi-Up glowing active border vs muted inactive cell frame
+                    var cellRect = OverlayRenderContext.MakeRounded(
+                        pane.Left + 0.5f, pane.Top + 0.5f,
+                        MathF.Max(1f, pane.Right - pane.Left - 1f),
+                        MathF.Max(1f, pane.Bottom - pane.Top - 1f), 10f);
+
+                    bool isActive = s == state.ActiveMultiUpSlot;
+                    if (isActive)
+                    {
+                        Color4 glowCol = GetSlotAccentRaw(s, 0.30f).ToColor4(_isFp16SwapChain);
+                        Color4 rimCol = GetSlotAccentRaw(s, 0.95f).ToColor4(_isFp16SwapChain);
+                        using var glowBrush = _dc.CreateSolidColorBrush(glowCol);
+                        using var rimBrush = _dc.CreateSolidColorBrush(rimCol);
+                        _dc.DrawRoundedRectangle(cellRect, glowBrush, 5.0f);
+                        _dc.DrawRoundedRectangle(cellRect, rimBrush, 2.2f);
+                    }
+                    else
+                    {
+                        using var idleBrush = _dc.CreateSolidColorBrush(theme.CardBorder.ToColor4(_isFp16SwapChain, 0.55f));
+                        _dc.DrawRoundedRectangle(cellRect, idleBrush, 1.0f);
+                    }
+                }
             }
         }
 
-        // =========================================================================
-        // PASS 2: Composite _sceneBitmap + Live Frosted-Glass Vibrancy HUD onto SwapChain
-        // =========================================================================
+        // PASS 2: Composite _sceneBitmap + Live Frosted-Glass Vibrancy HUD Overlays onto SwapChain
         _dc.Target = _backBufferBitmap;
         _dc.Transform = Matrix3x2.Identity;
         _dc.DrawBitmap(_sceneBitmap, 1.0f, BitmapInterpolationMode.NearestNeighbor);
 
-        if (!state.HasPlaylist)
-        {
-            DrawWelcomeCard(dipW, dipH);
-        }
-        else
-        {
-            if (state.HudOpacity > 0.01f)
-            {
-                DrawTopHud(dipW, state);
-                DrawBottomHud(dipW, dipH, state);
-                if (state.IsSplitCompare && state.SecondaryItem != null)
-                {
-                    DrawSecondaryPaneBadge(dipW, state);
-                }
-            }
+        int effPrimarySlot = state.IsSoloLoupeActive ? Math.Clamp(state.ActiveMultiUpSlot, 0, _slots.Length - 1) : 0;
+        RawRectF primaryPaneDip = state.IsSoloLoupeActive ? paneRects[0] : paneRects[0];
+        RawRectF secondaryPaneDip = (!state.IsSoloLoupeActive && paneRects.Length > 1) ? paneRects[1] : default;
 
-            if (state.ShowHistogram && state.Histogram != null)
-            {
-                DrawHistogramCard(dipW, dipH, state.Histogram);
-            }
-
-            if (state.ToastOpacity > 0.01f && !string.IsNullOrEmpty(state.ToastText))
-            {
-                DrawToastCard(dipW, dipH, state.ToastText!, state.ToastOpacity);
-            }
-        }
+        var overlayCtx = new OverlayRenderContext
+        {
+            Dc = _dc,
+            Factory = _d2dFactory,
+            DWrite = _dwrite,
+            BlurEffect = _hudBlurEffect,
+            Theme = theme,
+            Fonts = _fonts,
+            IsFp16 = _isFp16SwapChain,
+            DipWidth = dipW,
+            DipHeight = dipH,
+            DpiScale = DpiScale,
+            PrimaryImage = _slots[effPrimarySlot].Source,
+            SecondaryImage = state.IsSoloLoupeActive ? null : _slots[1].Source,
+            PrimaryBitmap = _slots[effPrimarySlot].Bitmap,
+            SecondaryBitmap = state.IsSoloLoupeActive ? null : _slots[1].Bitmap,
+            PrimaryPaneDip = primaryPaneDip,
+            SecondaryPaneDip = secondaryPaneDip,
+            PrimaryDestDip = slotDests[effPrimarySlot],
+            SecondaryDestDip = state.IsSoloLoupeActive ? default : slotDests[1],
+            MultiUpPanesDip = paneRects,
+            SlotBitmaps = slotBitmaps,
+            SlotImages = slotImages,
+            SlotDestsDip = slotDests,
+            FaceCropBitmaps = _faceCropBitmaps,
+            ResolveMicroThumbBitmap = ResolveMicroThumbBitmap
+        };
 
         if (state.ShowCheatsheet)
         {
-            DrawCheatsheetModal(dipW, dipH);
+            _cheatsheetOverlay.Render(overlayCtx, state);
+            _toastOverlay.Render(overlayCtx, state);
+        }
+        else
+        {
+            _welcomeOverlay.Render(overlayCtx, state);
+            _splitPaneBadgeOverlay.Render(overlayCtx, state);
+            _topHudOverlay.Render(overlayCtx, state);
+            _bottomHudOverlay.Render(overlayCtx, state);
+            _filmstripOverlay.Render(overlayCtx, state);
+            _faceDockOverlay.Render(overlayCtx, state);
+            _histogramOverlay.Render(overlayCtx, state);
+            _falseColorLegendOverlay.Render(overlayCtx, state);
+            _exifDossierOverlay.Render(overlayCtx, state);
+            _miniMapOverlay.Render(overlayCtx, state);
+            _cursorLoupeOverlay.Render(overlayCtx, state);
+            _toastOverlay.Render(overlayCtx, state);
         }
 
         var endRes = _dc.EndDraw();
@@ -633,565 +867,218 @@ public sealed class D2DRenderEngine : IDisposable
         }
     }
 
-    private void DrawPhotoInPane(GpuPhotoSlot slot, RawRectF paneDip, RenderHudState state, bool isPrimaryPane)
+    private static Rgba GetSlotAccentRaw(int slotIndex, float alpha) => slotIndex switch
     {
-        if (_dc == null || slot.Source == null || slot.Bitmap == null || slot.ColorManagedEffect == null) return;
+        0 => new Rgba(20, 184, 166, alpha),  // Teal
+        1 => new Rgba(245, 158, 11, alpha),  // Amber
+        2 => new Rgba(168, 85, 247, alpha),  // Purple
+        _ => new Rgba(16, 185, 129, alpha)   // Emerald
+    };
 
-        _dc.PushAxisAlignedClip(paneDip, AntialiasMode.Aliased);
+    private RawRectF DrawPhotoInPane(
+        GpuPhotoSlot slot,
+        RawRectF paneDip,
+        RenderHudState state,
+        int slotIdx,
+        bool roundedCell)
+    {
+        if (_dc == null || _d2dFactory == null || slot.Source == null || slot.Bitmap == null)
+        {
+            return default;
+        }
+
+        ID2D1RoundedRectangleGeometry? cellGeo = null;
+        if (roundedCell)
+        {
+            var rounded = OverlayRenderContext.MakeRounded(
+                paneDip.Left, paneDip.Top,
+                MathF.Max(1f, paneDip.Right - paneDip.Left),
+                MathF.Max(1f, paneDip.Bottom - paneDip.Top), 10f);
+            cellGeo = _d2dFactory.CreateRoundedRectangleGeometry(rounded);
+            var lp = new LayerParameters1
+            {
+                ContentBounds = paneDip,
+                GeometricMask = cellGeo,
+                MaskAntialiasMode = AntialiasMode.PerPrimitive,
+                MaskTransform = Matrix3x2.Identity,
+                Opacity = 1.0f,
+                LayerOptions = LayerOptions1.None
+            };
+            _dc.PushLayer(ref lp, null);
+
+            // Subtle dark backing card inside Multi-Up cell
+            using var cellBg = _dc.CreateSolidColorBrush(new Rgba(14, 15, 19, 1.0f).ToColor4(_isFp16SwapChain));
+            _dc.FillRectangle(paneDip, cellBg);
+        }
+        else
+        {
+            _dc.PushAxisAlignedClip(paneDip, AntialiasMode.Aliased);
+        }
 
         var dest = ComputePhotoDestDipRect(slot.Source, paneDip, state, out float physScale);
         float destW = dest.Right - dest.Left;
         float destH = dest.Bottom - dest.Top;
         float dpiScale = DpiScale;
 
-        bool needsColorManagement = slot.ColorManagedEffect != null && slot.CustomColorContext != null;
-        // Direct DrawBitmap bypasses D2D intermediate effect tiling limits (>4096) and provides maximum hardware throughput for sRGB
-        bool useDirectBitmap = !needsColorManagement || slot.Source.Width > 4096 || slot.Source.Height > 4096;
-
-        if (useDirectBitmap)
+        if (state.ShowFalseColor && slot.FalseColorBitmap != null)
         {
             var interpMode = physScale >= 1.95f
                 ? BitmapInterpolationMode.NearestNeighbor
                 : BitmapInterpolationMode.Linear;
-            _dc.DrawBitmap(slot.Bitmap, dest, 1.0f, interpMode, null);
+            _dc.DrawBitmap(slot.FalseColorBitmap, dest, 1.0f, interpMode, null);
         }
-        else
+        else if (slot.ActiveProfile != CameraProfile.AsShot && slot.ProfileMatrixEffect != null)
         {
             float scaleX = (destW * dpiScale) / slot.Source.Width;
             float scaleY = (destH * dpiScale) / slot.Source.Height;
-
             var interp = physScale >= 1.95f
                 ? D2DInterpolationMode.NearestNeighbor
                 : D2DInterpolationMode.HighQualityCubic;
 
-            var imgTransform = Matrix3x2.CreateScale(scaleX, scaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
-            _dc.Transform = imgTransform;
-            _dc.DrawImage(slot.ColorManagedEffect!, interp, CompositeMode.SourceOver);
+            _dc.Transform = Matrix3x2.CreateScale(scaleX, scaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
+            _dc.DrawImage(slot.ProfileMatrixEffect, interp, CompositeMode.SourceOver);
             _dc.Transform = Matrix3x2.Identity;
         }
+        else
+        {
+            bool needsColorManagement = slot.ColorManagedEffect != null && slot.CustomColorContext != null;
+            bool useDirectBitmap = !needsColorManagement || slot.Source.Width > 4096 || slot.Source.Height > 4096;
 
-        // GPU Focus Peaking (Shift + F)
+            if (useDirectBitmap)
+            {
+                var interpMode = physScale >= 1.95f
+                    ? BitmapInterpolationMode.NearestNeighbor
+                    : BitmapInterpolationMode.Linear;
+                _dc.DrawBitmap(slot.Bitmap, dest, 1.0f, interpMode, null);
+            }
+            else
+            {
+                float scaleX = (destW * dpiScale) / slot.Source.Width;
+                float scaleY = (destH * dpiScale) / slot.Source.Height;
+                var interp = physScale >= 1.95f
+                    ? D2DInterpolationMode.NearestNeighbor
+                    : D2DInterpolationMode.HighQualityCubic;
+
+                _dc.Transform = Matrix3x2.CreateScale(scaleX, scaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
+                _dc.DrawImage(slot.ColorManagedEffect!, interp, CompositeMode.SourceOver);
+                _dc.Transform = Matrix3x2.Identity;
+            }
+        }
+
+        // GPU Focus Peaking (Shift + F) across all visible slots
         if (state.ShowFocusPeaking && slot.PeakingMatrixEffect != null)
         {
             float scaleX = (destW * dpiScale) / slot.Source.Width;
             float scaleY = (destH * dpiScale) / slot.Source.Height;
-            var imgTransform = Matrix3x2.CreateScale(scaleX, scaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
-            _dc.Transform = imgTransform;
+            _dc.Transform = Matrix3x2.CreateScale(scaleX, scaleY) * Matrix3x2.CreateTranslation(dest.Left, dest.Top);
             _dc.DrawImage(slot.PeakingMatrixEffect, D2DInterpolationMode.Linear, CompositeMode.SourceOver);
             _dc.Transform = Matrix3x2.Identity;
         }
 
-        // Exposure Clipping Blinkies (O) on primary pane
-        if (isPrimaryPane && state.ShowClipping && _clippingBitmap != null)
+        // Exposure Clipping Blinkies (O) across visible slots
+        if (state.ShowClipping && !state.ShowFalseColor && slot.ClippingBitmap != null)
         {
             var interpMode = physScale >= 1.95f
                 ? BitmapInterpolationMode.NearestNeighbor
                 : BitmapInterpolationMode.Linear;
-            _dc.DrawBitmap(
-                _clippingBitmap,
-                dest,
-                state.ClippingPulseAlpha,
-                interpMode,
-                null
-            );
+            _dc.DrawBitmap(slot.ClippingBitmap, dest, state.ClippingPulseAlpha, interpMode, null);
         }
 
-        // AI Auto Eye Reticle (Shift + Z)
-        if (isPrimaryPane && state.EyeReticleOpacity > 0.01f && state.EyeReticlePoint is { } eyePt)
+        // AI Auto Eye Reticle (Shift + Z / Face Dock click)
+        if (slotIdx == state.EyeReticleSlot && state.EyeReticleOpacity > 0.01f && state.EyeReticlePoint is { } eyePt)
         {
             float ex = dest.Left + eyePt.X * destW;
             float ey = dest.Top + eyePt.Y * destH;
             float alpha = state.EyeReticleOpacity;
 
-            using var outerGlow = _dc.CreateSolidColorBrush(UiColor(0x00, 0xE5, 0xFF, 0.30f * alpha));
-            using var ringBrush = _dc.CreateSolidColorBrush(UiColor(0x40, 0xEC, 0xFF, 0.92f * alpha));
+            using var outerGlow = _dc.CreateSolidColorBrush(new Rgba(0x00, 0xE5, 0xFF, 0.30f * alpha).ToColor4(_isFp16SwapChain));
+            using var ringBrush = _dc.CreateSolidColorBrush(new Rgba(0x40, 0xEC, 0xFF, 0.92f * alpha).ToColor4(_isFp16SwapChain));
 
             float r = 22f + (1f - alpha) * 8f;
             _dc.DrawEllipse(new Ellipse(new Vector2(ex, ey), r + 2f, r + 2f), outerGlow, 4.0f);
             _dc.DrawEllipse(new Ellipse(new Vector2(ex, ey), r, r), ringBrush, 1.6f);
 
-            // Subtle crosshairs outside iris
             _dc.DrawLine(new Vector2(ex - r - 7f, ey), new Vector2(ex - r + 3f, ey), ringBrush, 1.4f);
             _dc.DrawLine(new Vector2(ex + r - 3f, ey), new Vector2(ex + r + 7f, ey), ringBrush, 1.4f);
             _dc.DrawLine(new Vector2(ex, ey - r - 7f), new Vector2(ex, ey - r + 3f), ringBrush, 1.4f);
             _dc.DrawLine(new Vector2(ex, ey + r - 3f), new Vector2(ex, ey + r + 7f), ringBrush, 1.4f);
         }
 
-        // Rejected photo subtle dim indicator border when unflagged toast fades
-        if ((isPrimaryPane ? state.PrimaryCulling.Pick : state.SecondaryCulling.Pick) == PickStatus.Reject)
+        PickStatus slotPick = state.MultiUpMode == MultiUpMode.Single
+            ? state.PrimaryCulling.Pick
+            : state.MultiUpSlots[slotIdx].Culling.Pick;
+
+        if (slotPick == PickStatus.Reject)
         {
-            using var rejDim = _dc.CreateSolidColorBrush(UiColor(0x00, 0x00, 0x00, 0.28f));
+            using var rejDim = _dc.CreateSolidColorBrush(new Rgba(0x00, 0x00, 0x00, 0.32f).ToColor4(_isFp16SwapChain));
             _dc.FillRectangle(dest, rejDim);
         }
 
-        _dc.PopAxisAlignedClip();
-    }
-
-    private void BeginFrostedCard(RoundedRectangle card, float opacity, float darkTintAlpha = 0.62f)
-    {
-        if (_dc == null || _d2dFactory == null || _hudBlurEffect == null) return;
-
-        using var geo = _d2dFactory.CreateRoundedRectangleGeometry(card);
-        var layerParams = new LayerParameters1
+        if (roundedCell)
         {
-            ContentBounds = card.Rect,
-            GeometricMask = geo,
-            MaskAntialiasMode = AntialiasMode.PerPrimitive,
-            MaskTransform = Matrix3x2.Identity,
-            Opacity = opacity,
-            LayerOptions = LayerOptions1.None
-        };
-
-        _dc.PushLayer(ref layerParams, null);
-        _dc.DrawImage(_hudBlurEffect, D2DInterpolationMode.Linear, CompositeMode.SourceCopy);
-
-        using var tintBrush = _dc.CreateSolidColorBrush(UiColor(0x10, 0x11, 0x15, darkTintAlpha));
-        _dc.FillRectangle(card.Rect, tintBrush);
-    }
-
-    private void EndFrostedCard(RoundedRectangle card, float opacity, Color4? accentBorder = null)
-    {
-        if (_dc == null) return;
-        _dc.PopLayer();
-
-        var borderCol = accentBorder ?? UiColor(255, 255, 255, 0.16f * opacity);
-        using var borderBrush = _dc.CreateSolidColorBrush(borderCol);
-        _dc.DrawRoundedRectangle(card, borderBrush, 1.0f);
-    }
-
-    private void DrawTopHud(float dipW, RenderHudState state)
-    {
-        if (_dc == null || _fontUiBold == null || _fontMonoSmall == null) return;
-        float alpha = state.HudOpacity;
-
-        // Left status pill
-        string counter = $"{state.CurrentIndex + 1} / {state.TotalCount}";
-        string extra = "";
-        if (state.ActiveFilter.Type != CullingFilterType.All) extra += $"  ·  {state.ActiveFilter.Title}";
-        if (state.IsSlideshowPlaying) extra += $"  ·  ▶ {state.SlideshowSeconds}s";
-        if (state.ShowFocusPeaking) extra += "  ·  PEAK";
-        if (state.ShowClipping) extra += "  ·  BLINK";
-        if (_isFp16SwapChain) extra += "  ·  HDR16";
-        if (state.IsLoadingFullRaw) extra += "  ·  16-BIT DEMOSAIC…";
-
-        string leftText = counter + extra;
-        float leftW = Math.Clamp(MeasureWidth(leftText, _fontUiBold) + 30f, 94f, dipW * 0.62f);
-        var leftCard = MakeRounded(20f, 18f, leftW, 34f, 11f);
-
-        BeginFrostedCard(leftCard, alpha);
-        using (var textBrush = _dc.CreateSolidColorBrush(UiColor(245, 246, 250, 0.95f)))
-        {
-            _dc.DrawText(leftText, _fontUiBold, new Rect(leftCard.Rect.Left + 14f, leftCard.Rect.Top, leftW - 28f, 34f), textBrush);
-        }
-        EndFrostedCard(leftCard, alpha);
-
-        // Right culling status pill (if Pick/Reject/Rating/Color set)
-        var cull = state.PrimaryCulling;
-        string cullText = BuildCullingSummary(cull);
-        if (!string.IsNullOrEmpty(cullText) || cull.Color != ColorLabel.None)
-        {
-            float dotExtra = cull.Color != ColorLabel.None ? 20f : 0f;
-            float rightW = Math.Max(56f, MeasureWidth(cullText, _fontUiBold) + 28f + dotExtra);
-            var rightCard = MakeRounded(dipW - rightW - 20f, 18f, rightW, 34f, 11f);
-
-            Color4? accent = cull.Pick switch
-            {
-                PickStatus.Pick => UiColor(0x4C, 0xAF, 0x50, 0.55f * alpha),
-                PickStatus.Reject => UiColor(0xEF, 0x53, 0x50, 0.55f * alpha),
-                _ => null
-            };
-
-            BeginFrostedCard(rightCard, alpha);
-            float tx = rightCard.Rect.Left + 14f;
-
-            if (cull.Color != ColorLabel.None)
-            {
-                using var dotBrush = _dc.CreateSolidColorBrush(ColorForLabel(cull.Color, 0.95f));
-                _dc.FillEllipse(new Ellipse(new Vector2(tx + 5f, rightCard.Rect.Top + 17f), 5.5f, 5.5f), dotBrush);
-                tx += 18f;
-            }
-
-            if (!string.IsNullOrEmpty(cullText))
-            {
-                var fg = cull.Pick == PickStatus.Pick
-                    ? UiColor(0x81, 0xC7, 0x84, 0.98f)
-                    : cull.Pick == PickStatus.Reject
-                        ? UiColor(0xEF, 0x9A, 0x9A, 0.98f)
-                        : UiColor(0xFF, 0xD5, 0x4F, 0.98f);
-                using var fgBrush = _dc.CreateSolidColorBrush(fg);
-                _dc.DrawText(cullText, _fontUiBold, new Rect(tx, rightCard.Rect.Top, rightW - 20f, 34f), fgBrush);
-            }
-
-            EndFrostedCard(rightCard, alpha, accent);
-        }
-    }
-
-    private void DrawSecondaryPaneBadge(float dipW, RenderHudState state)
-    {
-        if (_dc == null || _fontUiBold == null || state.SecondaryItem == null) return;
-        float alpha = state.HudOpacity;
-
-        string secCull = BuildCullingSummary(state.SecondaryCulling);
-        string label = $"COMPARE #{state.SecondaryIndex + 1}  ·  {state.SecondaryItem.DisplayName}";
-        if (!string.IsNullOrEmpty(secCull)) label += $"  ·  {secCull}";
-
-        float w = Math.Clamp(MeasureWidth(label, _fontUiBold) + 28f, 160f, dipW * 0.44f);
-        var card = MakeRounded(dipW * 0.5f + 16f, 18f, w, 34f, 11f);
-
-        BeginFrostedCard(card, alpha);
-        using (var brush = _dc.CreateSolidColorBrush(UiColor(0x90, 0xCA, 0xF9, 0.95f)))
-        {
-            _dc.DrawText(label, _fontUiBold, new Rect(card.Rect.Left + 14f, card.Rect.Top, w - 28f, 34f), brush);
-        }
-        EndFrostedCard(card, alpha);
-    }
-
-    private void DrawBottomHud(float dipW, float dipH, RenderHudState state)
-    {
-        if (_dc == null || _fontUiBold == null || _fontUiRegular == null || state.PrimaryItem == null) return;
-        var img = _primarySlot.Source;
-        float alpha = state.HudOpacity;
-
-        string zoomTag = !state.IsCustomZoom
-            ? "FIT"
-            : MathF.Abs(state.PixelZoomScale - 1.0f) < 0.03f
-                ? "100% 1:1"
-                : $"{(int)MathF.Round(state.PixelZoomScale * 100f)}%";
-
-        string formatBadge = img == null
-            ? ""
-            : img.IsFullSensorRaw
-                ? "RAW 16-bit"
-                : img.IsRaw
-                    ? "RAW Preview"
-                    : img.BitsPerChannel == 16 ? "16-bit" : "8-bit";
-
-        string colorBadge = img?.ColorProfileName ?? "sRGB";
-        string dims = img != null ? $"{img.OriginalWidth}×{img.OriginalHeight}" : "";
-        string sizeStr = FormatBytes(state.PrimaryItem.TotalStackSize);
-
-        string line1 = $"{state.PrimaryItem.DisplayName}   ·   {dims}   ·   {sizeStr}   ·   {formatBadge}   ·   {colorBadge}   ·   {zoomTag}";
-
-        string line2 = "";
-        if (img?.Exif != null)
-        {
-            var cam = img.Exif.CameraAndLensSummary;
-            var exp = img.Exif.ExposureSummary;
-            if (!string.IsNullOrEmpty(cam) && !string.IsNullOrEmpty(exp)) line2 = $"{cam}   ·   {exp}";
-            else line2 = !string.IsNullOrEmpty(cam) ? cam : exp;
-        }
-
-        bool hasLine2 = !string.IsNullOrWhiteSpace(line2);
-        float w1 = MeasureWidth(line1, _fontUiBold);
-        float w2 = hasLine2 ? MeasureWidth(line2, _fontUiRegular) : 0f;
-        float cardW = Math.Clamp(MathF.Max(w1, w2) + 40f, 280f, dipW - 40f);
-        float cardH = hasLine2 ? 54f : 36f;
-
-        var card = MakeRounded((dipW - cardW) * 0.5f, dipH - cardH - 18f, cardW, cardH, 13f);
-        BeginFrostedCard(card, alpha);
-
-        using var primaryText = _dc.CreateSolidColorBrush(UiColor(246, 247, 250, 0.96f));
-        if (hasLine2)
-        {
-            _dc.DrawText(line1, _fontUiBold, new Rect(card.Rect.Left + 20f, card.Rect.Top + 4f, cardW - 40f, 24f), primaryText);
-            using var subText = _dc.CreateSolidColorBrush(UiColor(185, 192, 206, 0.88f));
-            _dc.DrawText(line2, _fontUiRegular, new Rect(card.Rect.Left + 20f, card.Rect.Top + 26f, cardW - 40f, 22f), subText);
+            _dc.PopLayer();
+            cellGeo?.Dispose();
         }
         else
         {
-            _dc.DrawText(line1, _fontUiBold, new Rect(card.Rect.Left + 20f, card.Rect.Top, cardW - 40f, cardH), primaryText);
+            _dc.PopAxisAlignedClip();
         }
 
-        EndFrostedCard(card, alpha);
+        return dest;
     }
 
-    private void DrawHistogramCard(float dipW, float dipH, HistogramData hist)
+    private void DisposeFaceCropBitmaps()
     {
-        if (_dc == null || _d2dFactory == null || _fontMonoSmall == null) return;
-
-        const float cardW = 264f;
-        const float cardH = 122f;
-        var card = MakeRounded(dipW - cardW - 20f, dipH - cardH - 84f, cardW, cardH, 12f);
-
-        BeginFrostedCard(card, 0.96f, darkTintAlpha: 0.72f);
-
-        using (var titleBrush = _dc.CreateSolidColorBrush(UiColor(190, 198, 212, 0.80f)))
+        foreach (var b in _faceCropBitmaps)
         {
-            _dc.DrawText("RGB / LUMA HISTOGRAM", _fontMonoSmall, new Rect(card.Rect.Left + 12f, card.Rect.Top + 4f, cardW - 24f, 18f), titleBrush);
+            b?.Dispose();
         }
-
-        float plotLeft = card.Rect.Left + 10f;
-        float plotRight = card.Rect.Right - 10f;
-        float plotTop = card.Rect.Top + 24f;
-        float plotBottom = card.Rect.Bottom - 10f;
-        float plotW = plotRight - plotLeft;
-        float plotH = plotBottom - plotTop;
-
-        // Subtle 25% / 50% / 75% vertical grid lines
-        using (var gridBrush = _dc.CreateSolidColorBrush(UiColor(255, 255, 255, 0.07f)))
-        {
-            for (int g = 1; g <= 3; g++)
-            {
-                float gx = plotLeft + plotW * (g * 0.25f);
-                _dc.DrawLine(new Vector2(gx, plotTop), new Vector2(gx, plotBottom), gridBrush, 1.0f);
-            }
-        }
-
-        // Ignore extreme 0 and 255 spikes when normalizing peak so midtones stay readable
-        int normPeak = 1;
-        for (int i = 2; i < 254; i++)
-        {
-            if (hist.Red[i] > normPeak) normPeak = hist.Red[i];
-            if (hist.Green[i] > normPeak) normPeak = hist.Green[i];
-            if (hist.Blue[i] > normPeak) normPeak = hist.Blue[i];
-        }
-        if (normPeak <= 1) normPeak = Math.Max(1, hist.MaxCount);
-
-        DrawHistogramChannel(hist.Red, normPeak, plotLeft, plotBottom, plotW, plotH, UiColor(0xFF, 0x45, 0x55, 0.36f), UiColor(0xFF, 0x5C, 0x6C, 0.88f));
-        DrawHistogramChannel(hist.Green, normPeak, plotLeft, plotBottom, plotW, plotH, UiColor(0x38, 0xE5, 0x7A, 0.34f), UiColor(0x52, 0xF2, 0x8E, 0.85f));
-        DrawHistogramChannel(hist.Blue, normPeak, plotLeft, plotBottom, plotW, plotH, UiColor(0x3A, 0x9E, 0xFF, 0.36f), UiColor(0x58, 0xB2, 0xFF, 0.88f));
-        DrawHistogramChannel(hist.Luminance, normPeak, plotLeft, plotBottom, plotW, plotH, UiColor(255, 255, 255, 0.12f), UiColor(255, 255, 255, 0.72f));
-
-        EndFrostedCard(card, 0.96f);
+        _faceCropBitmaps.Clear();
     }
-
-    private void DrawHistogramChannel(
-        int[] bins,
-        int peak,
-        float left,
-        float bottom,
-        float width,
-        float height,
-        Color4 fillColor,
-        Color4 strokeColor)
-    {
-        if (_dc == null || _d2dFactory == null) return;
-
-        using var path = _d2dFactory.CreatePathGeometry();
-        using (var sink = path.Open())
-        {
-            sink.BeginFigure(new Vector2(left, bottom), FigureBegin.Filled);
-            for (int i = 0; i < 256; i += 2)
-            {
-                int val = (bins[i] + bins[Math.Min(255, i + 1)]) >> 1;
-                float norm = Math.Clamp((float)val / peak, 0f, 1f);
-                // Mild gamma lift (sqrt) so shadow/midtone distributions remain clear
-                float y = bottom - MathF.Pow(norm, 0.72f) * height;
-                float x = left + (i / 255.0f) * width;
-                sink.AddLine(new Vector2(x, y));
-            }
-            sink.AddLine(new Vector2(left + width, bottom));
-            sink.EndFigure(FigureEnd.Closed);
-            sink.Close();
-        }
-
-        using var fill = _dc.CreateSolidColorBrush(fillColor);
-        using var stroke = _dc.CreateSolidColorBrush(strokeColor);
-        _dc.FillGeometry(path, fill);
-        _dc.DrawGeometry(path, stroke, 1.15f);
-    }
-
-    private void DrawToastCard(float dipW, float dipH, string text, float opacity)
-    {
-        if (_dc == null || _fontToast == null) return;
-
-        float w = Math.Clamp(MeasureWidth(text, _fontToast) + 40f, 130f, dipW - 60f);
-        const float h = 44f;
-        float topY = Math.Min(62f, dipH * 0.15f);
-        var card = MakeRounded((dipW - w) * 0.5f, topY, w, h, 14f);
-
-        BeginFrostedCard(card, opacity, darkTintAlpha: 0.76f);
-        using (var brush = _dc.CreateSolidColorBrush(UiColor(255, 255, 255, 0.98f)))
-        {
-            _dc.DrawText(text, _fontToast, new Rect(card.Rect.Left + 12f, card.Rect.Top, w - 24f, h), brush);
-        }
-        EndFrostedCard(card, opacity);
-    }
-
-    private void DrawWelcomeCard(float dipW, float dipH)
-    {
-        if (_dc == null || _fontHero == null || _fontUiBold == null || _fontUiRegular == null || _fontMonoSmall == null) return;
-
-        float w = Math.Min(540f, dipW - 48f);
-        const float h = 230f;
-        var card = MakeRounded((dipW - w) * 0.5f, (dipH - h) * 0.5f, w, h, 20f);
-
-        BeginFrostedCard(card, 1.0f, darkTintAlpha: 0.78f);
-
-        using var white = _dc.CreateSolidColorBrush(UiColor(248, 250, 255, 0.98f));
-        using var muted = _dc.CreateSolidColorBrush(UiColor(175, 184, 200, 0.90f));
-        using var accent = _dc.CreateSolidColorBrush(UiColor(0x64, 0xB5, 0xF6, 0.95f));
-
-        _dc.DrawText("WinGlance 1.2", _fontHero, new Rect(card.Rect.Left, card.Rect.Top + 28f, w, 40f), white);
-
-        string sub = "Drop a folder or RAW / photo anywhere, or press Ctrl+O to browse";
-        float subW = MeasureWidth(sub, _fontUiBold);
-        _dc.DrawText(sub, _fontUiBold, new Rect(card.Rect.Left + (w - subW) * 0.5f, card.Rect.Top + 78f, subW + 10f, 28f), muted);
-
-        string stack = "Direct3D 11  ·  Direct2D 1.3 HDR16  ·  ICC WCG  ·  16-bit LibRaw  ·  DirectML AI";
-        float stackW = MeasureWidth(stack, _fontMonoSmall);
-        _dc.DrawText(stack, _fontMonoSmall, new Rect(card.Rect.Left + (w - stackW) * 0.5f, card.Rect.Top + 122f, stackW + 10f, 24f), accent);
-
-        string hint = "Press ? for shortcuts   ·   Esc to exit   ·   Windows port of Glance by @mortalezz";
-        float hintW = MeasureWidth(hint, _fontUiRegular);
-        _dc.DrawText(hint, _fontUiRegular, new Rect(card.Rect.Left + (w - hintW) * 0.5f, card.Rect.Top + 174f, hintW + 10f, 24f), muted);
-
-        EndFrostedCard(card, 1.0f);
-    }
-
-    private void DrawCheatsheetModal(float dipW, float dipH)
-    {
-        if (_dc == null || _fontCheatHeader == null || _fontUiBold == null || _fontUiRegular == null || _fontMonoSmall == null) return;
-
-        using (var backdrop = _dc.CreateSolidColorBrush(UiColor(0, 0, 0, 0.45f)))
-        {
-            _dc.FillRectangle(new RawRectF(0, 0, dipW, dipH), backdrop);
-        }
-
-        float w = Math.Min(720f, dipW - 40f);
-        float h = Math.Min(470f, dipH - 40f);
-        var card = MakeRounded((dipW - w) * 0.5f, (dipH - h) * 0.5f, w, h, 18f);
-
-        BeginFrostedCard(card, 0.99f, darkTintAlpha: 0.84f);
-
-        using var headerBrush = _dc.CreateSolidColorBrush(UiColor(250, 251, 255, 0.98f));
-        using var keyBrush = _dc.CreateSolidColorBrush(UiColor(0x80, 0xD8, 0xFF, 0.96f));
-        using var descBrush = _dc.CreateSolidColorBrush(UiColor(210, 216, 228, 0.92f));
-        using var footerBrush = _dc.CreateSolidColorBrush(UiColor(150, 160, 178, 0.88f));
-
-        _dc.DrawText("WinGlance 1.2  —  Pro Culling, GPU & AI Vision Shortcuts", _fontCheatHeader,
-            new Rect(card.Rect.Left + 26f, card.Rect.Top + 20f, w - 52f, 28f), headerBrush);
-
-        (string Key, string Desc)[] leftCol =
-        {
-            ("← / → / Wheel", "Previous / Next photo"),
-            ("Home / End", "First / Last photo"),
-            ("Space / [ ]", "Slideshow Play/Pause & Speed"),
-            ("F", "Toggle Fullscreen / Windowed"),
-            ("P / X / U", "Flag Pick / Reject / Unflag"),
-            ("1 – 5 / 0", "Star Rating (1–5) / Clear"),
-            ("6 / 7 / 8 / 9", "Red / Yellow / Green / Blue label"),
-            ("Ctrl + F", "Cycle Culling Filter (All/Picks/…)")
-        };
-
-        (string Key, string Desc)[] rightCol =
-        {
-            ("Z / R-Click", "100% 1:1 Sensor Zoom (16-bit RAW)"),
-            ("Shift+Z / M-Click", "AI Auto Face & Eye Jump (DirectML)"),
-            ("Shift + F", "GPU Focus Peaking (Sobel Shader)"),
-            ("O", "Exposure Clipping Blinkies"),
-            ("H", "Live RGB + Rec.709 Histogram"),
-            ("S  /  Tab", "2-Up Split Compare / Swap Panes"),
-            ("R  /  L", "Lossless EXIF + XMP Rotate CW/CCW"),
-            ("Ctrl+E / Shift+Del", "Export Picks / Purge Rejects")
-        };
-
-        float startY = card.Rect.Top + 62f;
-        float rowH = 38f;
-        float colW = (w - 64f) * 0.5f;
-
-        for (int i = 0; i < leftCol.Length; i++)
-        {
-            float y = startY + i * rowH;
-            _dc.DrawText(leftCol[i].Key, _fontMonoSmall, new Rect(card.Rect.Left + 26f, y, 130f, rowH), keyBrush);
-            _dc.DrawText(leftCol[i].Desc, _fontUiRegular, new Rect(card.Rect.Left + 158f, y, colW - 132f, rowH), descBrush);
-        }
-
-        float rightX = card.Rect.Left + 38f + colW;
-        for (int i = 0; i < rightCol.Length; i++)
-        {
-            float y = startY + i * rowH;
-            _dc.DrawText(rightCol[i].Key, _fontMonoSmall, new Rect(rightX, y, 142f, rowH), keyBrush);
-            _dc.DrawText(rightCol[i].Desc, _fontUiRegular, new Rect(rightX + 144f, y, colW - 144f, rowH), descBrush);
-        }
-
-        string credit = $"AI Engine: {EyeFocusDetector.ActiveBackend}  ·  SwapChain: {(_isFp16SwapChain ? "FP16 Linear scRGB HDR/WCG" : "BGRA8 sRGB")}  ·  Windows port of Glance for macOS by @mortalezz (github.com/mortalezz/glance)";
-        _dc.DrawText(credit, _fontUiRegular, new Rect(card.Rect.Left + 26f, card.Rect.Bottom - 38f, w - 52f, 24f), footerBrush);
-
-        EndFrostedCard(card, 0.99f);
-    }
-
-    private float MeasureWidth(string text, IDWriteTextFormat fmt)
-    {
-        if (_dwrite == null || string.IsNullOrEmpty(text)) return 0f;
-        using var layout = _dwrite.CreateTextLayout(text, fmt, 4096f, 64f);
-        return layout.Metrics.WidthIncludingTrailingWhitespace;
-    }
-
-    private static RoundedRectangle MakeRounded(float x, float y, float w, float h, float r) =>
-        new() { Rect = new RawRectF(x, y, x + w, y + h), RadiusX = r, RadiusY = r };
-
-    private static string BuildCullingSummary(CullingMetadata c)
-    {
-        string flag = c.Pick switch
-        {
-            PickStatus.Pick => "✓ PICK",
-            PickStatus.Reject => "✕ REJECT",
-            _ => ""
-        };
-        string stars = c.Rating > 0 ? new string('★', c.Rating) : "";
-        if (!string.IsNullOrEmpty(flag) && !string.IsNullOrEmpty(stars)) return $"{flag}  {stars}";
-        return !string.IsNullOrEmpty(flag) ? flag : stars;
-    }
-
-    private Color4 ColorForLabel(ColorLabel label, float alpha) => label switch
-    {
-        ColorLabel.Red => UiColor(0xEF, 0x53, 0x50, alpha),
-        ColorLabel.Yellow => UiColor(0xFF, 0xCA, 0x28, alpha),
-        ColorLabel.Green => UiColor(0x66, 0xBB, 0x6A, alpha),
-        ColorLabel.Blue => UiColor(0x42, 0xA5, 0xF5, alpha),
-        _ => UiColor(255, 255, 255, alpha)
-    };
-
-    private static string FormatBytes(long bytes)
-    {
-        if (bytes >= 1024 * 1024) return $"{bytes / (1024.0 * 1024.0):0.0} MB";
-        if (bytes >= 1024) return $"{bytes / 1024.0:0} KB";
-        return $"{bytes} B";
-    }
-
-    private Color4 UiColor(byte r, byte g, byte b, float a = 1.0f)
-    {
-        float rf = r / 255.0f;
-        float gf = g / 255.0f;
-        float bf = b / 255.0f;
-
-        if (_isFp16SwapChain)
-        {
-            return new Color4(SrgbToLinear(rf), SrgbToLinear(gf), SrgbToLinear(bf), a);
-        }
-        return new Color4(rf, gf, bf, a);
-    }
-
-    private static float SrgbToLinear(float c) =>
-        c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
 
     private void RecreateAllAfterDeviceReset()
     {
-        var prim = _primarySlot.Source;
-        var sec = _secondarySlot.Source;
-        var clip = _clippingSource;
+        var savedSources = new (DecodedImage? Image, DecodedImage? Clip, DecodedImage? Fc, CameraProfile Prof, CameraBrand Brand)[_slots.Length];
+        for (int i = 0; i < _slots.Length; i++)
+        {
+            savedSources[i] = (_slots[i].Source, _slots[i].ClippingSource, _slots[i].FalseColorSource, _slots[i].ActiveProfile, _slots[i].ActiveBrand);
+            _slots[i].Dispose();
+        }
 
-        _primarySlot.Dispose();
-        _secondarySlot.Dispose();
-        _clippingBitmap?.Dispose();
-        _clippingBitmap = null;
-        _clippingSource = null;
+        var savedFaces = _faceTilesSource;
+        _faceTilesSource = Array.Empty<FaceCropTile>();
+        DisposeFaceCropBitmaps();
+        ClearMicroThumbGpuCache();
 
         CreateDeviceResources();
         CreateWindowSizeResources();
 
-        if (prim != null) UploadToSlot(_primarySlot, prim);
-        if (sec != null) UploadToSlot(_secondarySlot, sec);
-        if (clip != null) SetClippingMask(clip);
+        for (int i = 0; i < _slots.Length; i++)
+        {
+            if (savedSources[i].Image != null)
+            {
+                _slots[i].ActiveProfile = savedSources[i].Prof;
+                _slots[i].ActiveBrand = savedSources[i].Brand;
+                UploadToSlot(_slots[i], savedSources[i].Image);
+            }
+            if (savedSources[i].Clip != null) SetSlotClippingMask(i, savedSources[i].Clip);
+            if (savedSources[i].Fc != null) SetSlotFalseColor(i, savedSources[i].Fc);
+        }
+
+        if (savedFaces.Count > 0)
+        {
+            SetFaceCropImages(savedFaces);
+        }
     }
 
     private void DisposeDeviceResources()
     {
-        _primarySlot.Dispose();
-        _secondarySlot.Dispose();
-        _clippingBitmap?.Dispose();
-        _clippingBitmap = null;
+        for (int i = 0; i < _slots.Length; i++)
+        {
+            _slots[i].Dispose();
+        }
+        DisposeFaceCropBitmaps();
+        ClearMicroThumbGpuCache();
 
         _hudBlurEffect?.Dispose();
         _hudBlurEffect = null;
@@ -1221,12 +1108,9 @@ public sealed class D2DRenderEngine : IDisposable
     public void Dispose()
     {
         DisposeDeviceResources();
-        _fontHero?.Dispose();
-        _fontToast?.Dispose();
-        _fontUiBold?.Dispose();
-        _fontUiRegular?.Dispose();
-        _fontMonoSmall?.Dispose();
-        _fontCheatHeader?.Dispose();
+        _fonts?.Dispose();
+        _fonts = null;
         _dwrite?.Dispose();
+        _dwrite = null;
     }
 }

@@ -70,6 +70,32 @@ public static class RawSensorDecoder
         return ConvertProcessedBitmap(img, isFullSensor: true, exif);
     }
 
+    /// <summary>
+    /// Fast half-resolution 8-bit LibRaw preview demosaic used when a RAW file's embedded JPEG
+    /// thumbnail is noticeably smaller than the active viewport.
+    /// </summary>
+    public static DecodedImage DecodeHalfSizePreview(string filePath, ExifMetadata? fallbackExif = null)
+    {
+        NativeRuntimeLoader.EnsureLibRawLoaded();
+        using var ctx = RawContext.OpenFile(filePath);
+        var exif = TryExtractExif(ctx) ?? fallbackExif;
+
+        ctx.Unpack();
+
+        ctx.DcrawProcess(p =>
+        {
+            p.HalfSize = true;
+            p.UseCameraWb = true;
+            p.OutputBps = 8;
+            p.OutputColor = LibRawColorSpace.SRGB;
+            p.NoAutoBright = true;
+            p.UserQual = DemosaicAlgorithm.LinearInterpolation;
+        });
+
+        using var img = ctx.MakeDcrawMemoryImage();
+        return ConvertProcessedBitmap(img, isFullSensor: false, exif);
+    }
+
     private static unsafe DecodedImage ConvertProcessedBitmap(ProcessedImage img, bool isFullSensor, ExifMetadata? exif)
     {
         int width = img.Width;
@@ -213,6 +239,18 @@ public static class RawSensorDecoder
                     .LocalDateTime.ToString("yyyy:MM:dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
             }
 
+            double? maxAperture = li.ExifMaxAperture > 0
+                ? li.ExifMaxAperture
+                : (li.MaxAperture4MinFocal > 0 ? li.MaxAperture4MinFocal : null);
+
+            string? lensSpec = null;
+            if (li.MinFocal > 0 && li.MaxFocal > 0 && li.MaxAperture4MinFocal > 0)
+            {
+                lensSpec = Math.Abs(li.MinFocal - li.MaxFocal) < 0.5f
+                    ? $"{li.MinFocal:0}mm ƒ/{li.MaxAperture4MinFocal:0.0}"
+                    : $"{li.MinFocal:0}–{li.MaxFocal:0}mm ƒ/{li.MaxAperture4MinFocal:0.0}";
+            }
+
             return new ExifMetadata(
                 CameraMake: NullIfEmpty(ip.Make),
                 CameraModel: NullIfEmpty(ip.Model),
@@ -222,7 +260,12 @@ public static class RawSensorDecoder
                 Iso: op.IsoSpeed > 0 ? (int)Math.Round(op.IsoSpeed) : null,
                 FocalLength: op.FocalLength > 0 ? op.FocalLength : null,
                 FocalLength35mm: li.FocalLengthIn35mmFormat > 0 ? li.FocalLengthIn35mmFormat : null,
-                DateTimeOriginal: dateStr
+                DateTimeOriginal: dateStr,
+                LensMake: NullIfEmpty(li.LensMake),
+                LensSpecification: lensSpec,
+                MaxAperture: maxAperture,
+                Software: NullIfEmpty(ip.Software),
+                LensSerialNumber: NullIfEmpty(li.LensSerial) ?? NullIfEmpty(li.InternalLensSerial)
             );
         }
         catch

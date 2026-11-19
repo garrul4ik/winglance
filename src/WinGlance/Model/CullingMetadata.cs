@@ -44,7 +44,8 @@ public record struct CullingMetadata(
     int Rating = 0,
     PickStatus Pick = PickStatus.Unflagged,
     ColorLabel Color = ColorLabel.None,
-    int? Orientation = null
+    int? Orientation = null,
+    CameraProfile? CameraProfile = null
 )
 {
     public int Rating { get; init; } = Math.Clamp(Rating, 0, 5);
@@ -57,16 +58,19 @@ public enum CullingFilterType
     HideRejects,
     RejectsOnly,
     UnratedOnly,
-    MinRating
+    MinRating,
+    Color
 }
 
-public record CullingFilter(CullingFilterType Type, int MinStars = 0)
+public record CullingFilter(CullingFilterType Type, int MinStars = 0, ColorLabel FilterColor = ColorLabel.None)
 {
     public static readonly CullingFilter All = new(CullingFilterType.All);
     public static readonly CullingFilter PicksOnly = new(CullingFilterType.PicksOnly);
     public static readonly CullingFilter HideRejects = new(CullingFilterType.HideRejects);
     public static readonly CullingFilter RejectsOnly = new(CullingFilterType.RejectsOnly);
     public static readonly CullingFilter UnratedOnly = new(CullingFilterType.UnratedOnly);
+
+    public static CullingFilter ForColor(ColorLabel color) => new(CullingFilterType.Color, 0, color);
 
     public string Title => Type switch
     {
@@ -75,7 +79,8 @@ public record CullingFilter(CullingFilterType Type, int MinStars = 0)
         CullingFilterType.HideRejects => "Hide Rejects",
         CullingFilterType.RejectsOnly => "Rejects Only (X)",
         CullingFilterType.UnratedOnly => "Unrated Only",
-        CullingFilterType.MinRating => $"{MinStars}+ Stars",
+        CullingFilterType.MinRating => MinStars == 5 ? "5 Stars" : $"{MinStars}+ Stars",
+        CullingFilterType.Color => $"{FilterColor.GetTitle()} Label",
         _ => "All Files"
     };
 
@@ -87,6 +92,7 @@ public record CullingFilter(CullingFilterType Type, int MinStars = 0)
         CullingFilterType.RejectsOnly => meta.Pick == PickStatus.Reject,
         CullingFilterType.UnratedOnly => meta.Rating == 0 && meta.Pick == PickStatus.Unflagged,
         CullingFilterType.MinRating => meta.Rating >= MinStars,
+        CullingFilterType.Color => meta.Color == FilterColor,
         _ => true
     };
 }

@@ -43,6 +43,30 @@ public static class XmpSidecarManager
                );
     }
 
+    public static IReadOnlyList<string> GetAllExistingSidecarPaths(SlideItem item)
+    {
+        var results = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var path in item.AllPaths)
+        {
+            var dir = Path.GetDirectoryName(path) ?? "";
+            var stemPath = Path.Combine(dir, $"{Path.GetFileNameWithoutExtension(path)}.xmp");
+            if (File.Exists(stemPath) && seen.Add(stemPath))
+            {
+                results.Add(stemPath);
+            }
+
+            var suffixPath = Path.Combine(dir, $"{Path.GetFileName(path)}.xmp");
+            if (File.Exists(suffixPath) && seen.Add(suffixPath))
+            {
+                results.Add(suffixPath);
+            }
+        }
+
+        return results;
+    }
+
     public static CullingMetadata Read(string sidecarPath)
     {
         try
@@ -71,7 +95,7 @@ public static class XmpSidecarManager
             var dict = new Dictionary<string, CullingMetadata>(StringComparer.OrdinalIgnoreCase);
             foreach (var item in items)
             {
-                var meta = ReadMetadata(item.Path);
+                var meta = (item.RawPath != null ? ReadMetadata(item.RawPath) : null) ?? ReadMetadata(item.Path);
                 if (meta.HasValue)
                 {
                     dict[item.Id] = meta.Value;
@@ -87,6 +111,7 @@ public static class XmpSidecarManager
         var pick = PickStatus.Unflagged;
         var color = ColorLabel.None;
         int? orientation = null;
+        CameraProfile? profile = null;
 
         var descriptions = doc.Descendants().Where(e => e.Name.LocalName == "Description");
 
@@ -95,17 +120,17 @@ public static class XmpSidecarManager
             // Check attributes
             foreach (var attr in desc.Attributes())
             {
-                ApplyField(attr.Name.LocalName, attr.Value.Trim(), ref rating, ref pick, ref color, ref orientation);
+                ApplyField(attr.Name.LocalName, attr.Value.Trim(), ref rating, ref pick, ref color, ref orientation, ref profile);
             }
 
             // Check child elements
             foreach (var child in desc.Elements())
             {
-                ApplyField(child.Name.LocalName, child.Value.Trim(), ref rating, ref pick, ref color, ref orientation);
+                ApplyField(child.Name.LocalName, child.Value.Trim(), ref rating, ref pick, ref color, ref orientation, ref profile);
             }
         }
 
-        return new CullingMetadata(rating, pick, color, orientation);
+        return new CullingMetadata(rating, pick, color, orientation, profile);
     }
 
     private static void ApplyField(
@@ -114,7 +139,8 @@ public static class XmpSidecarManager
         ref int rating,
         ref PickStatus pick,
         ref ColorLabel color,
-        ref int? orientation)
+        ref int? orientation,
+        ref CameraProfile? profile)
     {
         if (local == "Rating")
         {
@@ -147,6 +173,26 @@ public static class XmpSidecarManager
                 orientation = o;
             }
         }
+        else if (local == "CameraProfile")
+        {
+            var p = CameraProfileExtensions.ParseXmp(val);
+            if (p.HasValue)
+            {
+                profile = p.Value;
+            }
+        }
+    }
+
+    private static CameraBrand InferBrandFromPath(string path)
+    {
+        string ext = Path.GetExtension(path).ToLowerInvariant();
+        return ext switch
+        {
+            ".raf" => CameraBrand.Fujifilm,
+            ".nef" or ".nrw" => CameraBrand.Nikon,
+            ".arw" or ".srf" or ".sr2" => CameraBrand.Sony,
+            _ => CameraBrand.Unsupported
+        };
     }
 
     private static ColorLabel? ParseColor(string val)
@@ -162,9 +208,15 @@ public static class XmpSidecarManager
         };
     }
 
-    public static void Save(CullingMetadata metadata, string imagePath)
+    public static void Save(CullingMetadata metadata, string imagePath, Action<string>? onBeforeWrite = null, CameraBrand brand = CameraBrand.Unsupported)
     {
+        var effectiveBrand = brand == CameraBrand.Unsupported ? InferBrandFromPath(imagePath) : brand;
         var sidecarPath = TargetSidecarPath(imagePath);
+        SaveToSidecarPath(metadata, sidecarPath, onBeforeWrite, effectiveBrand);
+    }
+
+    public static void SaveToSidecarPath(CullingMetadata metadata, string sidecarPath, Action<string>? onBeforeWrite = null, CameraBrand brand = CameraBrand.Unsupported)
+    {
         XDocument doc;
 
         if (File.Exists(sidecarPath))
@@ -198,7 +250,7 @@ public static class XmpSidecarManager
         }
 
         // Remove old attributes & child elements for these fields
-        var targetNames = new HashSet<string> { "Rating", "PickStatus", "Label", "Urgency", "Orientation" };
+        var targetNames = new HashSet<string> { "Rating", "PickStatus", "Label", "Urgency", "Orientation", "CameraProfile" };
         foreach (var attr in rdfDesc.Attributes().Where(a => targetNames.Contains(a.Name.LocalName)).ToList())
         {
             attr.Remove();
@@ -231,9 +283,15 @@ public static class XmpSidecarManager
             rdfDesc.SetAttributeValue(TiffNs + "Orientation", metadata.Orientation.Value);
         }
 
+        if (metadata.CameraProfile is { } prof && prof != CameraProfile.AsShot)
+        {
+            rdfDesc.SetAttributeValue(CrsNs + "CameraProfile", prof.GetXmpName(brand));
+        }
+
         var tempPath = $"{sidecarPath}.tmp.{Guid.NewGuid():N}";
         try
         {
+            onBeforeWrite?.Invoke(sidecarPath);
             doc.Save(tempPath);
             File.Move(tempPath, sidecarPath, overwrite: true);
         }

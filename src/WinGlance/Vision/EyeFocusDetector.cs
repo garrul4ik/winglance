@@ -542,7 +542,7 @@ public static unsafe class EyeFocusDetector
         return union > 0f ? inter / union : 0f;
     }
 
-    private static float MeasureLocalSharpness(DecodedImage image, NormalizedPoint pt)
+    public static float MeasureLocalSharpness(DecodedImage image, NormalizedPoint pt)
     {
         int cx = Math.Clamp((int)MathF.Round(pt.X * image.Width), 2, image.Width - 3);
         int cy = Math.Clamp((int)MathF.Round(pt.Y * image.Height), 2, image.Height - 3);

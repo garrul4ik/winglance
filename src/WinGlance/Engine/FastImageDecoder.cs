@@ -42,9 +42,14 @@ public static class FastImageDecoder
                 {
                     var fallbackExif = ReadExifMetadata(filePath);
                     var raw16 = RawSensorDecoder.DecodeFullSensor16Bit(filePath, fallbackExif);
-                    if (xmpOrientation is >= 2 and <= 8 && xmpOrientation != (fallbackExif?.Orientation ?? 1))
+                    int headerOrient = fallbackExif?.Orientation ?? raw16.Exif?.Orientation ?? 1;
+                    if (xmpOrientation is >= 1 and <= 8 && xmpOrientation.Value != headerOrient)
                     {
-                        return TransformRgbaOrBgraSoftware(raw16, xmpOrientation.Value);
+                        int delta = ComputeDeltaOrientation(headerOrient, xmpOrientation.Value);
+                        if (delta != 1)
+                        {
+                            return TransformRgbaOrBgraSoftware(raw16, delta);
+                        }
                     }
                     return raw16;
                 }
@@ -402,9 +407,16 @@ public static class FastImageDecoder
                 }
                 else if (bitmapThumb != null && jpegBytes == null)
                 {
-                    return xmpOrientation is >= 2 and <= 8
-                        ? TransformRgbaOrBgraSoftware(bitmapThumb, xmpOrientation.Value)
-                        : bitmapThumb;
+                    int headerOrient = parentExif?.Orientation ?? libRawExif?.Orientation ?? 1;
+                    if (xmpOrientation is >= 1 and <= 8 && xmpOrientation.Value != headerOrient)
+                    {
+                        int delta = ComputeDeltaOrientation(headerOrient, xmpOrientation.Value);
+                        if (delta != 1)
+                        {
+                            return TransformRgbaOrBgraSoftware(bitmapThumb, delta);
+                        }
+                    }
+                    return bitmapThumb;
                 }
             }
 
@@ -413,7 +425,40 @@ public static class FastImageDecoder
                 return null;
             }
 
-            return DecodeJpegBytesViaWic(jpegBytes, maxBoundingPixelSize, isRaw: true, parentExif, xmpOrientation);
+            var preview = DecodeJpegBytesViaWic(jpegBytes, maxBoundingPixelSize, isRaw: true, parentExif, xmpOrientation);
+
+            // Phase 1.8: Validate embedded RAW preview resolution against viewport bounding size
+            if (maxBoundingPixelSize > 0)
+            {
+                int previewMax = Math.Max(preview.Width, preview.Height);
+                int minAcceptable = (int)(maxBoundingPixelSize * 0.75);
+                if (previewMax < minAcceptable)
+                {
+                    try
+                    {
+                        var half = RawSensorDecoder.DecodeHalfSizePreview(filePath, parentExif ?? preview.Exif);
+                        if (Math.Max(half.Width, half.Height) > previewMax)
+                        {
+                            int headerOrient = parentExif?.Orientation ?? preview.Exif?.Orientation ?? 1;
+                            if (xmpOrientation is >= 1 and <= 8 && xmpOrientation.Value != headerOrient)
+                            {
+                                int delta = ComputeDeltaOrientation(headerOrient, xmpOrientation.Value);
+                                if (delta != 1)
+                                {
+                                    half = TransformRgbaOrBgraSoftware(half, delta);
+                                }
+                            }
+                            return half;
+                        }
+                    }
+                    catch
+                    {
+                        // Synthetic or partial RAW files without sensor payload fall back to embedded preview
+                    }
+                }
+            }
+
+            return preview;
         }
         catch
         {
@@ -859,28 +904,33 @@ public static class FastImageDecoder
             : BinaryPrimitives.ReadUInt32BigEndian(tiff.Slice(4, 4));
         if (ifd0 >= tiff.Length - 2) return null;
 
-        string? make = null, model = null, lens = null, dateOrig = null;
-        double? shutter = null, aperture = null, focal = null, bias = null;
+        string? make = null, model = null, lens = null, dateOrig = null, subSecOrig = null;
+        string? software = null, lensMake = null, lensSpec = null, bodySerial = null, lensSerial = null;
+        double? shutter = null, aperture = null, focal = null, bias = null, maxAperture = null;
         int? iso = null, focal35 = null, orientation = null;
+        int? expProg = null, metering = null, wb = null, flashCode = null, colorSpace = null;
         bool? flash = null;
         uint exifIfdOffset = 0;
 
         ParseSingleIfd(tiff, (int)ifd0, le,
-            ref make, ref model, ref lens, ref dateOrig,
-            ref shutter, ref aperture, ref iso, ref focal, ref focal35, ref bias, ref flash, ref orientation,
+            ref make, ref model, ref lens, ref dateOrig, ref subSecOrig, ref software, ref lensMake, ref lensSpec, ref bodySerial, ref lensSerial,
+            ref shutter, ref aperture, ref focal, ref bias, ref maxAperture,
+            ref iso, ref focal35, ref orientation, ref expProg, ref metering, ref wb, ref flashCode, ref colorSpace, ref flash,
             ref exifIfdOffset);
 
         if (exifIfdOffset > 0 && exifIfdOffset < tiff.Length - 2)
         {
             uint dummy = 0;
             ParseSingleIfd(tiff, (int)exifIfdOffset, le,
-                ref make, ref model, ref lens, ref dateOrig,
-                ref shutter, ref aperture, ref iso, ref focal, ref focal35, ref bias, ref flash, ref orientation,
+                ref make, ref model, ref lens, ref dateOrig, ref subSecOrig, ref software, ref lensMake, ref lensSpec, ref bodySerial, ref lensSerial,
+                ref shutter, ref aperture, ref focal, ref bias, ref maxAperture,
+                ref iso, ref focal35, ref orientation, ref expProg, ref metering, ref wb, ref flashCode, ref colorSpace, ref flash,
                 ref dummy);
         }
 
         if (make == null && model == null && lens == null && shutter == null &&
-            aperture == null && iso == null && focal == null && orientation == null && dateOrig == null)
+            aperture == null && iso == null && focal == null && orientation == null && dateOrig == null &&
+            software == null && expProg == null && metering == null && bodySerial == null)
         {
             return null;
         }
@@ -897,7 +947,19 @@ public static class FastImageDecoder
             ExposureBias: bias,
             FlashFired: flash,
             DateTimeOriginal: dateOrig,
-            Orientation: orientation
+            Orientation: orientation,
+            ExposureProgram: expProg,
+            MeteringMode: metering,
+            WhiteBalance: wb,
+            FlashCode: flashCode,
+            ColorSpaceCode: colorSpace,
+            LensMake: lensMake,
+            LensSpecification: lensSpec,
+            MaxAperture: maxAperture,
+            Software: software,
+            BodySerialNumber: bodySerial,
+            LensSerialNumber: lensSerial,
+            SubSecTimeOriginal: subSecOrig
         );
     }
 
@@ -909,14 +971,26 @@ public static class FastImageDecoder
         ref string? model,
         ref string? lens,
         ref string? dateOrig,
+        ref string? subSecOrig,
+        ref string? software,
+        ref string? lensMake,
+        ref string? lensSpec,
+        ref string? bodySerial,
+        ref string? lensSerial,
         ref double? shutter,
         ref double? aperture,
-        ref int? iso,
         ref double? focal,
-        ref int? focal35,
         ref double? bias,
-        ref bool? flash,
+        ref double? maxAperture,
+        ref int? iso,
+        ref int? focal35,
         ref int? orientation,
+        ref int? expProg,
+        ref int? metering,
+        ref int? wb,
+        ref int? flashCode,
+        ref int? colorSpace,
+        ref bool? flash,
         ref uint exifIfdOffset)
     {
         if (ifdOffset < 0 || ifdOffset + 2 > tiff.Length) return;
@@ -945,6 +1019,9 @@ public static class FastImageDecoder
                 case 0x0112: // Orientation
                     orientation ??= ReadTiffInt(tiff, type, count, valBytes, valOffset, le);
                     break;
+                case 0x0131: // Software
+                    software ??= ReadTiffAscii(tiff, type, count, valBytes, valOffset);
+                    break;
                 case 0x8769: // ExifIFDPointer
                     exifIfdOffset = valOffset;
                     break;
@@ -953,6 +1030,9 @@ public static class FastImageDecoder
                     break;
                 case 0x829D: // FNumber
                     aperture ??= ReadTiffUnsignedRational(tiff, type, valOffset, le);
+                    break;
+                case 0x8822: // ExposureProgram
+                    expProg ??= ReadTiffInt(tiff, type, count, valBytes, valOffset, le);
                     break;
                 case 0x8827: // PhotographicSensitivity (ISO)
                     iso ??= ReadTiffInt(tiff, type, count, valBytes, valOffset, le);
@@ -963,21 +1043,69 @@ public static class FastImageDecoder
                 case 0x9204: // ExposureBiasValue
                     bias ??= ReadTiffSignedRational(tiff, type, valOffset, le);
                     break;
+                case 0x9205: // MaxApertureValue (APEX -> F-number)
+                    if (maxAperture == null)
+                    {
+                        var apex = ReadTiffUnsignedRational(tiff, type, valOffset, le);
+                        if (apex is > 0 and < 20) maxAperture = Math.Pow(2.0, apex.Value / 2.0);
+                    }
+                    break;
+                case 0x9207: // MeteringMode
+                    metering ??= ReadTiffInt(tiff, type, count, valBytes, valOffset, le);
+                    break;
                 case 0x9209: // Flash
                     var flashVal = ReadTiffInt(tiff, type, count, valBytes, valOffset, le);
-                    if (flashVal.HasValue) flash ??= (flashVal.Value & 1) != 0;
+                    if (flashVal.HasValue)
+                    {
+                        flashCode ??= flashVal.Value;
+                        flash ??= (flashVal.Value & 1) != 0;
+                    }
                     break;
                 case 0x920A: // FocalLength
                     focal ??= ReadTiffUnsignedRational(tiff, type, valOffset, le);
                     break;
+                case 0xA001: // ColorSpace
+                    colorSpace ??= ReadTiffInt(tiff, type, count, valBytes, valOffset, le);
+                    break;
+                case 0xA403: // WhiteBalance
+                    wb ??= ReadTiffInt(tiff, type, count, valBytes, valOffset, le);
+                    break;
                 case 0xA405: // FocalLengthIn35mmFilm
                     focal35 ??= ReadTiffInt(tiff, type, count, valBytes, valOffset, le);
+                    break;
+                case 0xA431: // BodySerialNumber
+                    bodySerial ??= ReadTiffAscii(tiff, type, count, valBytes, valOffset);
+                    break;
+                case 0xA432: // LensSpecification (4 RATIONALs: minF, maxF, minA, maxA)
+                    lensSpec ??= ReadTiffLensSpecification(tiff, type, count, valOffset, le);
+                    break;
+                case 0xA433: // LensMake
+                    lensMake ??= ReadTiffAscii(tiff, type, count, valBytes, valOffset);
+                    break;
+                case 0x9291: // SubSecTimeOriginal
+                    subSecOrig ??= ReadTiffAscii(tiff, type, count, valBytes, valOffset);
                     break;
                 case 0xA434: // LensModel
                     lens ??= ReadTiffAscii(tiff, type, count, valBytes, valOffset);
                     break;
+                case 0xA435: // LensSerialNumber
+                    lensSerial ??= ReadTiffAscii(tiff, type, count, valBytes, valOffset);
+                    break;
             }
         }
+    }
+
+    private static string? ReadTiffLensSpecification(ReadOnlySpan<byte> tiff, ushort type, uint count, uint offset, bool le)
+    {
+        if (type != 5 || count < 4 || (long)offset + 32 > tiff.Length) return null;
+        double? minF = ReadTiffUnsignedRational(tiff, 5, offset, le);
+        double? maxF = ReadTiffUnsignedRational(tiff, 5, offset + 8, le);
+        double? minA = ReadTiffUnsignedRational(tiff, 5, offset + 16, le);
+        if (minF is not > 0 || maxF is not > 0 || minA is not > 0) return null;
+
+        return Math.Abs(minF.Value - maxF.Value) < 0.5
+            ? $"{minF.Value:0}mm ƒ/{minA.Value:0.0}"
+            : $"{minF.Value:0}–{maxF.Value:0}mm ƒ/{minA.Value:0.0}";
     }
 
     private static string? ReadTiffAscii(ReadOnlySpan<byte> tiff, ushort type, uint count, ReadOnlySpan<byte> inlineBytes, uint offset)
@@ -1043,8 +1171,19 @@ public static class FastImageDecoder
             double? shutter = GetWicDouble(reader, "System.Photo.ExposureTime");
             double? aperture = GetWicDouble(reader, "System.Photo.FNumber");
             double? focal = GetWicDouble(reader, "System.Photo.FocalLength");
+            int? expProg = GetWicInt(reader, "/app1/ifd/exif/{ushort=34850}");
+            int? metering = GetWicInt(reader, "/app1/ifd/exif/{ushort=37383}");
+            int? wb = GetWicInt(reader, "/app1/ifd/exif/{ushort=41987}");
+            int? flashCode = GetWicInt(reader, "/app1/ifd/exif/{ushort=37385}");
+            int? colorSpace = GetWicInt(reader, "/app1/ifd/exif/{ushort=40961}");
+            string? software = GetWicString(reader, "/app1/ifd/{ushort=305}");
+            string? bodySerial = GetWicString(reader, "/app1/ifd/exif/{ushort=42033}");
+            string? lensMake = GetWicString(reader, "/app1/ifd/exif/{ushort=42035}");
+            string? lensSerial = GetWicString(reader, "/app1/ifd/exif/{ushort=42037}");
+            string? dateOrig = GetWicString(reader, "/app1/ifd/exif/{ushort=36867}") ?? GetWicString(reader, "/ifd/exif/{ushort=36867}");
+            string? subSecOrig = GetWicString(reader, "/app1/ifd/exif/{ushort=37521}") ?? GetWicString(reader, "/ifd/exif/{ushort=37521}");
 
-            if (make == null && model == null && lens == null && orientation == null && iso == null && shutter == null && aperture == null)
+            if (make == null && model == null && lens == null && orientation == null && iso == null && shutter == null && aperture == null && dateOrig == null && subSecOrig == null)
             {
                 return null;
             }
@@ -1057,7 +1196,19 @@ public static class FastImageDecoder
                 Aperture: aperture,
                 Iso: iso,
                 FocalLength: focal,
-                Orientation: orientation
+                DateTimeOriginal: dateOrig,
+                FlashFired: flashCode.HasValue ? (flashCode.Value & 1) != 0 : null,
+                Orientation: orientation,
+                ExposureProgram: expProg,
+                MeteringMode: metering,
+                WhiteBalance: wb,
+                FlashCode: flashCode,
+                ColorSpaceCode: colorSpace,
+                LensMake: lensMake,
+                Software: software,
+                BodySerialNumber: bodySerial,
+                LensSerialNumber: lensSerial,
+                SubSecTimeOriginal: subSecOrig
             );
         }
         catch
@@ -1127,13 +1278,48 @@ public static class FastImageDecoder
             ExposureBias: primary.ExposureBias ?? secondary.ExposureBias,
             FlashFired: primary.FlashFired ?? secondary.FlashFired,
             DateTimeOriginal: primary.DateTimeOriginal ?? secondary.DateTimeOriginal,
-            Orientation: primary.Orientation ?? secondary.Orientation
+            Orientation: primary.Orientation ?? secondary.Orientation,
+            ExposureProgram: primary.ExposureProgram ?? secondary.ExposureProgram,
+            MeteringMode: primary.MeteringMode ?? secondary.MeteringMode,
+            WhiteBalance: primary.WhiteBalance ?? secondary.WhiteBalance,
+            FlashCode: primary.FlashCode ?? secondary.FlashCode,
+            ColorSpaceCode: primary.ColorSpaceCode ?? secondary.ColorSpaceCode,
+            LensMake: primary.LensMake ?? secondary.LensMake,
+            LensSpecification: primary.LensSpecification ?? secondary.LensSpecification,
+            MaxAperture: primary.MaxAperture ?? secondary.MaxAperture,
+            Software: primary.Software ?? secondary.Software,
+            BodySerialNumber: primary.BodySerialNumber ?? secondary.BodySerialNumber,
+            LensSerialNumber: primary.LensSerialNumber ?? secondary.LensSerialNumber,
+            ShutterCount: primary.ShutterCount ?? secondary.ShutterCount,
+            SubSecTimeOriginal: primary.SubSecTimeOriginal ?? secondary.SubSecTimeOriginal
         );
     }
 
     #endregion
 
     #region Software Orientation Helper for 16-bit RAW XMP Overrides
+
+    public static int ComputeDeltaOrientation(int fromOrientation, int toOrientation)
+    {
+        int degFrom = OrientationToCwDegrees(fromOrientation);
+        int degTo = OrientationToCwDegrees(toOrientation);
+        int deltaDeg = (degTo - degFrom + 360) % 360;
+        return deltaDeg switch
+        {
+            90 => 6,
+            180 => 3,
+            270 => 8,
+            _ => 1
+        };
+    }
+
+    private static int OrientationToCwDegrees(int orientation) => orientation switch
+    {
+        6 => 90,
+        3 => 180,
+        8 => 270,
+        _ => 0
+    };
 
     private static unsafe DecodedImage TransformRgbaOrBgraSoftware(DecodedImage src, int orientation)
     {

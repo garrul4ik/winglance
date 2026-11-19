@@ -47,7 +47,7 @@ public static class LosslessRotationEngine
         };
     }
 
-    public static int Rotate(SlideItem item, RotationDirection direction)
+    public static int Rotate(SlideItem item, RotationDirection direction, Action<string>? onBeforeWrite = null)
     {
         var primaryTarget = item.RawPath ?? item.Path;
 
@@ -64,6 +64,7 @@ public static class LosslessRotationEngine
         {
             if (!SupportedFormats.IsRaw(path))
             {
+                onBeforeWrite?.Invoke(path);
                 TryWriteLosslessExifOrientation(path, (ushort)newOrientation);
             }
         }
@@ -71,7 +72,18 @@ public static class LosslessRotationEngine
         // 3. Sync XMP sidecar (canonical for RAW + Lightroom/Camera Raw interop)
         var meta = currentMeta ?? new CullingMetadata();
         meta = meta with { Orientation = newOrientation };
-        XmpSidecarManager.Save(meta, primaryTarget);
+        XmpSidecarManager.Save(meta, primaryTarget, onBeforeWrite);
+
+        // Sync any other existing sidecar on stacked companions so orientations never diverge
+        var primarySidecar = XmpSidecarManager.TargetSidecarPath(primaryTarget);
+        foreach (var existingSidecar in XmpSidecarManager.GetAllExistingSidecarPaths(item))
+        {
+            if (!string.Equals(existingSidecar, primarySidecar, StringComparison.OrdinalIgnoreCase))
+            {
+                var otherMeta = XmpSidecarManager.Read(existingSidecar) with { Orientation = newOrientation };
+                XmpSidecarManager.SaveToSidecarPath(otherMeta, existingSidecar, onBeforeWrite);
+            }
+        }
 
         return newOrientation;
     }
